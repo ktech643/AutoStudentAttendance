@@ -20,13 +20,15 @@ class Student {
   final int embeddingCount;
 
   factory Student.fromJson(Map<String, dynamic> json) {
+    // Handles both our FastAPI shape (id, full_name, section, is_active)
+    // and Docker AttendX shape (student_id, name, class_name — no section/roll).
     return Student(
-      id: json['id'] as String,
+      id: (json['id'] ?? json['student_id']) as String,
       externalId: json['external_id'] as String?,
       rollNumber: json['roll_number'] as String?,
-      fullName: json['full_name'] as String,
-      className: json['class_name'] as String,
-      section: json['section'] as String,
+      fullName: (json['full_name'] ?? json['name'] ?? '') as String,
+      className: (json['class_name'] ?? '') as String,
+      section: (json['section'] ?? '') as String,
       isActive: json['is_active'] as bool? ?? true,
       embeddingCount: json['embedding_count'] as int? ?? 0,
     );

@@ -15,9 +15,11 @@ class AppConfig {
 }
 
 const defaultAppConfig = AppConfig(
-  apiBaseUrl: String.fromEnvironment('FLUTTER_API_BASE_URL', defaultValue: 'http://127.0.0.1:8000'),
+  // Docker container attendx-api is exposed on host port 8008 (0.0.0.0:8008->8000).
+  // iPhone reaches it via the Mac's LAN IP.
+  apiBaseUrl: String.fromEnvironment('FLUTTER_API_BASE_URL', defaultValue: 'http://192.168.2.146:8008'),
   deviceId: String.fromEnvironment('FLUTTER_DEVICE_ID', defaultValue: 'ipad-kiosk-1'),
-  simulatedRecognition: bool.fromEnvironment('FLUTTER_SIMULATED_RECOGNITION', defaultValue: true),
+  simulatedRecognition: bool.fromEnvironment('FLUTTER_SIMULATED_RECOGNITION', defaultValue: false),
   adminEmail: String.fromEnvironment('FLUTTER_ADMIN_EMAIL', defaultValue: 'admin@school.com'),
   adminPassword: String.fromEnvironment('FLUTTER_ADMIN_PASSWORD', defaultValue: 'changeMe123'),
 );

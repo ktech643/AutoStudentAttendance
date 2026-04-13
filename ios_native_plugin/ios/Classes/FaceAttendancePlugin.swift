@@ -1,3 +1,4 @@
+import AVFoundation
 import Flutter
 import UIKit
 import Vision
@@ -6,12 +7,21 @@ public class FaceAttendancePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private var eventSink: FlutterEventSink?
   private var pipeline: FaceRecognitionPipeline?
 
+  /// Shared session used by both the recognition pipeline and the camera preview PlatformView.
+  /// Owned here so the preview works even before recognition is explicitly started.
+  let captureSession = AVCaptureSession()
+
   public static func register(with registrar: FlutterPluginRegistrar) {
+    let instance = FaceAttendancePlugin()
+
     let methodChannel = FlutterMethodChannel(name: "face_attendance/methods", binaryMessenger: registrar.messenger())
     let eventChannel = FlutterEventChannel(name: "face_attendance/events", binaryMessenger: registrar.messenger())
-    let instance = FaceAttendancePlugin()
     registrar.addMethodCallDelegate(instance, channel: methodChannel)
     eventChannel.setStreamHandler(instance)
+
+    // Register the native camera preview PlatformView.
+    let factory = CameraPreviewFactory(plugin: instance)
+    registrar.register(factory, withId: "face_attendance/camera_preview")
   }
 
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -54,7 +64,7 @@ public class FaceAttendancePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     case "extractEmbeddingFromImage":
       guard let args = call.arguments as? [String: Any],
             let typedData = args["jpegBytes"] as? FlutterStandardTypedData else {
-        result(FlutterError(code: "INVALID_ARGS", message: "jpegBytes (FlutterStandardTypedData) required", details: nil))
+        result(FlutterError(code: "INVALID_ARGS", message: "jpegBytes required", details: nil))
         return
       }
       extractEmbeddingFromJpeg(data: typedData.data, result: result)
@@ -84,22 +94,22 @@ public class FaceAttendancePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     pipeline?.start()
   }
 
-  /// Creates the pipeline once; subsequent calls are no-ops.
   private func ensurePipeline() {
     guard pipeline == nil else { return }
-    let embeddingModel = FaceEmbeddingModelFactory.make()
-    let embeddingStore = InMemoryEmbeddingStore()
-    let matcher = FaceMatcher(embeddingStore: embeddingStore)
+    let model = FaceEmbeddingModelFactory.make()
+    let store = InMemoryEmbeddingStore()
+    let matcher = FaceMatcher(embeddingStore: store)
     pipeline = FaceRecognitionPipeline(
-      embeddingModel: embeddingModel,
+      embeddingModel: model,
       matcher: matcher,
+      captureSession: captureSession,
       onEvent: { [weak self] event in
         self?.eventSink?(event.toDictionary())
       }
     )
   }
 
-  /// Decodes a JPEG, detects the face, crops it, and extracts a Vision feature print.
+  /// Runs VNDetectFaceLandmarksRequest on the still JPEG (single pass, no crop needed).
   private func extractEmbeddingFromJpeg(data: Data, result: @escaping FlutterResult) {
     DispatchQueue.global(qos: .userInitiated).async {
       do {
@@ -110,46 +120,20 @@ public class FaceAttendancePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
           return
         }
 
-        // 1. Detect face in the still image.
-        let faceRequest = VNDetectFaceRectanglesRequest()
-        let imageW = CGFloat(cgImage.width)
-        let imageH = CGFloat(cgImage.height)
+        let request = VNDetectFaceLandmarksRequest()
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        try handler.perform([faceRequest])
+        try handler.perform([request])
 
-        guard let faces = faceRequest.results as? [VNFaceObservation], let face = faces.first else {
+        guard let face = request.results?.first as? VNFaceObservation else {
           DispatchQueue.main.async {
             result(FlutterError(code: "NO_FACE", message: "No face detected in the image", details: nil))
           }
           return
         }
 
-        // 2. Crop with 15% padding (same margin as live pipeline).
-        let box = face.boundingBox
-        let faceRect = CGRect(
-          x: box.origin.x * imageW,
-          y: (1.0 - box.origin.y - box.height) * imageH,
-          width: box.width * imageW,
-          height: box.height * imageH
-        )
-        let padded = faceRect
-          .insetBy(dx: -faceRect.width * 0.15, dy: -faceRect.height * 0.15)
-          .intersection(CGRect(origin: .zero, size: CGSize(width: imageW, height: imageH)))
-
-        guard !padded.isNull, let cropped = cgImage.cropping(to: padded) else {
-          DispatchQueue.main.async {
-            result(FlutterError(code: "CROP_FAILED", message: "Cannot crop face region", details: nil))
-          }
-          return
-        }
-
-        // 3. Extract embedding with the best available model.
         let model = FaceEmbeddingModelFactory.make()
-        let embedding = try model.embedding(from: cropped)
-
-        DispatchQueue.main.async {
-          result(embedding.map { Double($0) })
-        }
+        let embedding = try model.embedding(from: face)
+        DispatchQueue.main.async { result(embedding.map { Double($0) }) }
       } catch {
         DispatchQueue.main.async {
           result(FlutterError(code: "EMBEDDING_FAILED", message: error.localizedDescription, details: nil))

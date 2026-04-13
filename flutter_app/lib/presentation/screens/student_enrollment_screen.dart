@@ -1,6 +1,7 @@
 import 'dart:async' show Timer, unawaited;
 import 'dart:io' show Platform;
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
@@ -21,12 +22,15 @@ class _EnrollmentSample {
     required this.accepted,
     required this.hint,
     required this.embedding,
+    this.jpegBytes,
   });
 
   final double qualityScore;
   final bool accepted;
   final String hint;
   final List<double> embedding;
+  /// Raw JPEG for Docker's /enroll multipart upload.
+  final Uint8List? jpegBytes;
 }
 
 class StudentEnrollmentScreen extends ConsumerStatefulWidget {
@@ -202,6 +206,7 @@ class _StudentEnrollmentScreenState extends ConsumerState<StudentEnrollmentScree
             accepted: accepted,
             hint: hint,
             embedding: embedding,
+            jpegBytes: bytes,
           ));
           _instructionTick = (_instructionTick + 1) % _instructions.length;
           _status = _buildStatus();
@@ -319,6 +324,11 @@ class _StudentEnrollmentScreenState extends ConsumerState<StudentEnrollmentScree
     final embeddings = acceptedList.map((s) => s.embedding.isNotEmpty ? s.embedding : _mockEmbedding()).toList(growable: false);
     final qualities = acceptedList.map((s) => s.qualityScore).toList(growable: false);
     final sourceType = _nativeEmbeddingAvailable ? 'ios_vision_feature_print' : 'mock_enrollment';
+    // Collect JPEG bytes for Docker's /enroll multipart upload.
+    final jpegImages = acceptedList
+        .map((s) => s.jpegBytes)
+        .whereType<Uint8List>()
+        .toList(growable: false);
 
     try {
       await repository.enrollStudent(
@@ -326,6 +336,9 @@ class _StudentEnrollmentScreenState extends ConsumerState<StudentEnrollmentScree
         embeddings: embeddings,
         qualityScores: qualities,
         sourceType: sourceType,
+        jpegImages: jpegImages.isNotEmpty ? jpegImages : null,
+        studentName: _createdStudent?.fullName,
+        className: _createdStudent?.className,
       );
       ref.invalidate(studentListProvider);
       try {

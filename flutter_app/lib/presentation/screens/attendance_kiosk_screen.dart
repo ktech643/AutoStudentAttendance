@@ -1,6 +1,8 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
+import 'package:ios_face_attendance_plugin/ios_native_plugin.dart';
 
 import '../providers/providers.dart';
 import '../providers/kiosk_state.dart';
@@ -26,8 +28,11 @@ class _AttendanceKioskScreenState extends ConsumerState<AttendanceKioskScreen> {
         final students = await ref.read(studentRepositoryProvider).fetchStudents();
         ref.read(simulatedStudentPoolProvider.notifier).state = students;
       } catch (_) {}
-      if (!mounted) {
-        return;
+      if (!mounted) return;
+      final config = ref.read(appConfigProvider);
+      // In native mode the plugin owns the camera — mark it ready immediately.
+      if (!config.simulatedRecognition && defaultTargetPlatform == TargetPlatform.iOS) {
+        ref.read(kioskControllerProvider.notifier).reportCameraPreviewReady(true);
       }
       await ref.read(kioskControllerProvider.notifier).startRecognition();
     });
@@ -88,7 +93,7 @@ class _AttendanceKioskScreenState extends ConsumerState<AttendanceKioskScreen> {
   }
 }
 
-class _KioskPreviewStack extends StatelessWidget {
+class _KioskPreviewStack extends ConsumerWidget {
   const _KioskPreviewStack({
     required this.kioskState,
     required this.cameraMountId,
@@ -100,16 +105,39 @@ class _KioskPreviewStack extends StatelessWidget {
   final ValueChanged<bool> onCameraReady;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final config = ref.watch(appConfigProvider);
+    final isDocker = ref.watch(isDockerBackendProvider).valueOrNull ?? false;
+
+    // Docker mode: DockerRecognitionSource owns the camera — show FaceCameraView
+    //   (it starts its own session; the source's internal camera is separate).
+    //   We show a plain black background with overlay; the Docker source captures
+    //   frames independently.  On iOS with our native plugin, use NativeCameraPreview.
+    final useNativePreview = !config.simulatedRecognition &&
+        !isDocker &&
+        defaultTargetPlatform == TargetPlatform.iOS;
+
     return Stack(
       fit: StackFit.expand,
       children: [
-        FaceCameraView(
-          key: ValueKey<int>(cameraMountId),
-          onReady: (c) {
-            onCameraReady(c != null && c.value.isInitialized);
-          },
-        ),
+        if (useNativePreview)
+          const NativeCameraPreview()
+        else if (isDocker)
+          // Docker: show a camera preview using FaceCameraView while the source
+          // captures frames independently in the background.
+          FaceCameraView(
+            key: ValueKey<int>(cameraMountId),
+            onReady: (c) {
+              onCameraReady(c != null && c.value.isInitialized);
+            },
+          )
+        else
+          FaceCameraView(
+            key: ValueKey<int>(cameraMountId),
+            onReady: (c) {
+              onCameraReady(c != null && c.value.isInitialized);
+            },
+          ),
         RecognitionOverlay(event: kioskState.latestRecognition),
         Positioned(
           top: 12,

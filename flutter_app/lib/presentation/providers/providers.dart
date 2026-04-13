@@ -22,6 +22,7 @@ import '../../data/services/auth_bootstrap_service.dart';
 import '../../data/services/analytics_hook.dart';
 import '../../data/services/face_attendance_platform_service.dart';
 import '../../data/services/recognition_decision_engine.dart';
+import '../../data/services/docker_recognition_source.dart';
 import '../../data/services/recognition_source.dart';
 import '../../data/services/simulated_recognition_service.dart';
 import '../../data/services/sync_service.dart';
@@ -57,6 +58,21 @@ final simulatedRecognitionServiceProvider = Provider<SimulatedRecognitionService
 /// Students used by simulated recognition (real UUIDs / names / rolls). Refresh from the kiosk screen.
 final simulatedStudentPoolProvider = StateProvider<List<Student>>((ref) => const []);
 
+/// Whether the configured backend is the Docker AttendX API.
+/// Detected by attempting to fetch /health and checking for docker-specific fields.
+/// We also use a simple heuristic: if /embeddings/all is unavailable the backend is Docker.
+final isDockerBackendProvider = FutureProvider<bool>((ref) async {
+  final client = ref.watch(apiClientProvider);
+  try {
+    final r = await client.dio.get<Map<String, dynamic>>('/health');
+    final data = r.data ?? {};
+    // Docker health returns { model_fast, model_accurate } — our FastAPI doesn't.
+    return data.containsKey('model_fast') || data.containsKey('models_loaded');
+  } catch (_) {
+    return false;
+  }
+});
+
 final recognitionSourceProvider = Provider<RecognitionSource>((ref) {
   final config = ref.watch(appConfigProvider);
   if (config.simulatedRecognition) {
@@ -64,6 +80,12 @@ final recognitionSourceProvider = Provider<RecognitionSource>((ref) {
       ref.watch(simulatedRecognitionServiceProvider),
       () => ref.read(simulatedStudentPoolProvider),
     );
+  }
+  // Use DockerRecognitionSource when the backend is Docker AttendX (server-side InsightFace).
+  // Fall back to native on-device recognition for our custom FastAPI backend.
+  final isDocker = ref.watch(isDockerBackendProvider).valueOrNull ?? false;
+  if (isDocker) {
+    return DockerRecognitionSource(dio: ref.watch(apiClientProvider).dio);
   }
   return PlatformRecognitionSource(FaceAttendancePlatformService());
 });

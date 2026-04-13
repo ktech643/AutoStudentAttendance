@@ -25,15 +25,15 @@ class AuthBootstrapService {
           },
         );
 
+        // 404 means the backend has no auth endpoint (e.g. Docker demo API).
+        // Proceed without a bearer token — all requests will go unauthenticated.
+        if (response.statusCode == 404) return;
+
         if (response.statusCode == 200) {
           final token = response.data?['access_token'] as String?;
-          if (token == null || token.isEmpty) {
-            throw DioException(
-              requestOptions: RequestOptions(path: '/auth/login'),
-              message: 'Missing access token',
-            );
+          if (token != null && token.isNotEmpty) {
+            _apiClient.setBearerToken(token);
           }
-          _apiClient.setBearerToken(token);
           return;
         }
 

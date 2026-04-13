@@ -3,177 +3,127 @@ import CoreGraphics
 import Foundation
 import Vision
 
+// MARK: - Protocol
+
+/// Face embedding from a Vision face observation (bounding box + landmarks already computed).
+/// Accepting VNFaceObservation directly avoids running a second Vision request on a cropped image.
 protocol FaceEmbeddingModel {
-  func embedding(from faceImage: CGImage) throws -> [Float]
+  func embedding(from observation: VNFaceObservation) throws -> [Float]
 }
 
 enum FaceEmbeddingModelError: Error {
-  case invalidInput
   case noFaceDetected
   case landmarksUnavailable
 }
 
-// MARK: - Landmark-based face embedding (iOS 11+, stable across all iOS versions)
+// MARK: - Landmark-based embedding (iOS 11+, stable across all iOS versions)
 
-/// Extracts a 256-element normalised float embedding from face landmark geometry.
+/// 256-element L2-normalised float vector built from face landmark geometry.
 ///
-/// Pipeline:
-///   1. `VNDetectFaceLandmarksRequest` → all 2-D landmark points in face-normalised coords.
-///   2. Centre the point cloud (subtract centroid).
-///   3. Scale-normalise by the inter-ocular distance (IPD).
-///   4. Concatenate [x, y] pairs → 152-dim landmark vector (76 points × 2).
-///   5. Augment with 52 pairwise distances between key landmark groups.
-///   6. Pad / truncate to exactly 256 floats and L2-normalise.
-///
-/// Accuracy notes:
-///   - Robust to lighting, colour, and moderate pose variation because it uses
-///     facial geometry, not pixels.
-///   - FAR/FRR performance is lower than a trained neural-net model; suitable
-///     for controlled kiosk settings where enrollment quality is managed.
+/// Steps:
+///  1. Collect all landmark points (VNFaceLandmarks2D.allPoints — up to 76 pts).
+///  2. Centre by centroid; scale-normalise by inter-ocular distance.
+///  3. Flatten [x, y] pairs → 152 floats.
+///  4. Add 120 pairwise distances between 16 evenly-spaced key points.
+///  5. Pad/trim to 256 elements; L2-normalise.
 final class VisionLandmarkEmbeddingModel: FaceEmbeddingModel {
 
-  func embedding(from faceImage: CGImage) throws -> [Float] {
-    let request = VNDetectFaceLandmarksRequest()
-    let handler = VNImageRequestHandler(cgImage: faceImage, options: [:])
-    try handler.perform([request])
-
-    guard let face = request.results?.first as? VNFaceObservation else {
-      throw FaceEmbeddingModelError.noFaceDetected
-    }
-    guard let landmarks = face.landmarks else {
+  func embedding(from observation: VNFaceObservation) throws -> [Float] {
+    guard let lm = observation.landmarks else {
       throw FaceEmbeddingModelError.landmarksUnavailable
     }
-
-    var pts = collectPoints(landmarks)
+    var pts = collectPoints(lm)
     guard pts.count >= 10 else { throw FaceEmbeddingModelError.landmarksUnavailable }
-
-    pts = centerAndScale(pts, landmarks: landmarks)
-    let vec = buildVector(pts)
-    return normalizeL2(vec)
+    pts = centerAndScale(pts, landmarks: lm)
+    return normalizeL2(buildVector(pts))
   }
 
-  // MARK: - Helpers
+  // MARK: Private helpers
 
   private func collectPoints(_ lm: VNFaceLandmarks2D) -> [SIMD2<Float>] {
+    // allPoints is the canonical superset; fall back to merging regions if absent.
+    if let all = lm.allPoints, !all.normalizedPoints.isEmpty {
+      return all.normalizedPoints.map { SIMD2(Float($0.x), Float($0.y)) }
+    }
     let regions: [VNFaceLandmarkRegion2D?] = [
-      lm.allPoints,
-      lm.faceContour,
-      lm.leftEye,   lm.rightEye,
+      lm.faceContour, lm.leftEye, lm.rightEye,
       lm.leftEyebrow, lm.rightEyebrow,
       lm.nose, lm.noseCrest,
-      lm.outerLips, lm.innerLips,
-      lm.medianLine,
+      lm.outerLips, lm.innerLips, lm.medianLine,
     ]
-    var out: [SIMD2<Float>] = []
-    for region in regions.compactMap({ $0 }) {
-      for p in region.normalizedPoints {
-        out.append(SIMD2(Float(p.x), Float(p.y)))
-      }
+    return regions.compactMap { $0 }.flatMap { r in
+      r.normalizedPoints.map { SIMD2(Float($0.x), Float($0.y)) }
     }
-    // Deduplicate (allPoints overlaps with specific regions)
-    if let all = lm.allPoints {
-      var deduped: [SIMD2<Float>] = []
-      for p in all.normalizedPoints {
-        deduped.append(SIMD2(Float(p.x), Float(p.y)))
-      }
-      return deduped  // use allPoints as the canonical set for consistency
-    }
-    return out
   }
 
-  /// Centre the point cloud by centroid and normalise scale by inter-ocular distance.
-  private func centerAndScale(_ pts: [SIMD2<Float>], landmarks: VNFaceLandmarks2D) -> [SIMD2<Float>] {
+  private func centerAndScale(_ pts: [SIMD2<Float>], landmarks lm: VNFaceLandmarks2D) -> [SIMD2<Float>] {
     let cx = pts.map(\.x).reduce(0, +) / Float(pts.count)
     let cy = pts.map(\.y).reduce(0, +) / Float(pts.count)
-    var centred = pts.map { SIMD2($0.x - cx, $0.y - cy) }
+    let centred = pts.map { SIMD2($0.x - cx, $0.y - cy) }
 
-    // Compute inter-ocular distance for scale normalisation
-    var iod: Float = 0.1
-    if let leftEye = landmarks.leftEye, let rightEye = landmarks.rightEye,
-       !leftEye.normalizedPoints.isEmpty, !rightEye.normalizedPoints.isEmpty {
-      let le = leftEye.normalizedPoints
-      let re = rightEye.normalizedPoints
-      let lc = le.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x / CGFloat(le.count), y: $0.y + $1.y / CGFloat(le.count)) }
-      let rc = re.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x / CGFloat(re.count), y: $0.y + $1.y / CGFloat(re.count)) }
-      let dx = Float(lc.x - rc.x)
-      let dy = Float(lc.y - rc.y)
-      iod = max(sqrt(dx * dx + dy * dy), 0.01)
+    var iod: Float = 0.12
+    if let le = lm.leftEye, let re = lm.rightEye,
+       !le.normalizedPoints.isEmpty, !re.normalizedPoints.isEmpty {
+      func centroid(_ r: VNFaceLandmarkRegion2D) -> SIMD2<Float> {
+        let pts = r.normalizedPoints
+        let sx = pts.reduce(0) { $0 + Float($1.x) } / Float(pts.count)
+        let sy = pts.reduce(0) { $0 + Float($1.y) } / Float(pts.count)
+        return SIMD2(sx, sy)
+      }
+      let d = centroid(le) - centroid(re)
+      iod = max(sqrt(d.x * d.x + d.y * d.y), 0.01)
     }
-
     return centred.map { SIMD2($0.x / iod, $0.y / iod) }
   }
 
-  /// Build a fixed-length descriptor from landmark coordinates + key pairwise distances.
   private func buildVector(_ pts: [SIMD2<Float>]) -> [Float] {
     var vec: [Float] = []
     vec.reserveCapacity(256)
-
-    // Part 1: Flattened [x, y] coordinates (up to 76 points = 152 floats)
-    for pt in pts.prefix(76) {
-      vec.append(pt.x)
-      vec.append(pt.y)
-    }
-
-    // Part 2: Pairwise distances between evenly-spaced landmark pairs (up to 104 values)
-    let stride = max(1, pts.count / 16)
-    var indices: [Int] = []
-    var i = 0
-    while i < pts.count && indices.count < 16 { indices.append(i); i += stride }
-
-    for a in 0..<indices.count {
-      for b in (a + 1)..<indices.count {
-        let d = distance(pts[indices[a]], pts[indices[b]])
-        vec.append(d)
+    // Up to 76 points × 2 = 152 coordinate floats
+    for pt in pts.prefix(76) { vec.append(pt.x); vec.append(pt.y) }
+    // Pairwise distances between 16 evenly-sampled key points (up to 120 values)
+    let step = max(1, pts.count / 16)
+    var keys: [Int] = stride(from: 0, to: pts.count, by: step).prefix(16).map { $0 }
+    for a in 0..<keys.count {
+      for b in (a + 1)..<keys.count {
+        let d = pts[keys[a]] - pts[keys[b]]
+        vec.append(sqrt(d.x * d.x + d.y * d.y))
       }
     }
-
-    // Pad or truncate to exactly 256
     if vec.count < 256 { vec += [Float](repeating: 0, count: 256 - vec.count) }
     return Array(vec.prefix(256))
   }
 
-  private func distance(_ a: SIMD2<Float>, _ b: SIMD2<Float>) -> Float {
-    let d = a - b
-    return sqrt(d.x * d.x + d.y * d.y)
-  }
-
   private func normalizeL2(_ v: [Float]) -> [Float] {
-    var sum: Float = 0
-    vDSP_svesq(v, 1, &sum, vDSP_Length(v.count))
-    let norm = sqrt(sum)
+    var sq: Float = 0
+    vDSP_svesq(v, 1, &sq, vDSP_Length(v.count))
+    var norm = sqrt(sq)
     guard norm > 1e-6 else { return v }
-    var result = v
-    var n = norm
-    vDSP_vsdiv(result, 1, &n, &result, 1, vDSP_Length(result.count))
-    return result
+    var out = v
+    vDSP_vsdiv(out, 1, &norm, &out, 1, vDSP_Length(out.count))
+    return out
   }
 }
 
-// MARK: - Mock fallback (dev / testing only)
+// MARK: - Mock (dev / simulator only)
 
 final class MockFaceEmbeddingModel: FaceEmbeddingModel {
-  func embedding(from faceImage: CGImage) throws -> [Float] {
-    let width = max(faceImage.width, 1)
-    let height = max(faceImage.height, 1)
+  func embedding(from observation: VNFaceObservation) throws -> [Float] {
+    let b = observation.boundingBox
+    let w = Int(b.width * 9973) + 1
+    let h = Int(b.height * 9973) + 1
     var out = [Float](repeating: 0, count: 128)
     for i in 0..<128 {
-      let seed = Float((width * (i + 1) + height * (i + 7)) % 997)
+      let seed = Float((w * (i + 1) + h * (i + 7)) % 997)
       out[i] = (seed / 997.0) * 2.0 - 1.0
     }
-    return normalizeL2(out)
-  }
-
-  private func normalizeL2(_ v: [Float]) -> [Float] {
-    let norm = sqrt(v.reduce(0) { $0 + $1 * $1 })
-    guard norm > 1e-6 else { return v }
-    return v.map { $0 / norm }
+    let norm = sqrt(out.reduce(0) { $0 + $1 * $1 })
+    return norm > 1e-6 ? out.map { $0 / norm } : out
   }
 }
 
 // MARK: - Factory
 
 enum FaceEmbeddingModelFactory {
-  static func make() -> FaceEmbeddingModel {
-    return VisionLandmarkEmbeddingModel()
-  }
+  static func make() -> FaceEmbeddingModel { VisionLandmarkEmbeddingModel() }
 }
