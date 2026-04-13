@@ -11,8 +11,8 @@ Native iOS pipeline using AVFoundation + Vision with CoreML embedding integratio
   s.source           = { :path => '.' }
   s.source_files     = 'Classes/**/*'
   s.dependency       'Flutter'
-  s.platform         = :ios, '13.0'
+  s.platform         = :ios, '16.0'
   s.swift_version    = '5.0'
-  s.frameworks       = 'AVFoundation', 'Vision', 'CoreImage', 'CoreML'
+  s.frameworks       = 'AVFoundation', 'Vision', 'CoreImage', 'CoreML', 'Accelerate'
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES' }
 end

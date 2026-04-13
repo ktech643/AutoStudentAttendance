@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../../core/config/attendance_thresholds.dart';
@@ -15,8 +16,7 @@ class FaceAttendancePlatformService {
 
   Stream<RecognitionEvent> recognitionEvents() {
     return _eventChannel.receiveBroadcastStream().map((dynamic raw) {
-      final map = _castMap(raw);
-      return RecognitionEvent.fromJson(map);
+      return RecognitionEvent.fromJson(_castMap(raw));
     });
   }
 
@@ -42,13 +42,34 @@ class FaceAttendancePlatformService {
     await _methodChannel.invokeMethod<void>('setDebugMode', {'enabled': value});
   }
 
+  /// Sends enrolled embeddings (fetched from the backend) to the native plugin
+  /// so it can perform on-device face matching without network calls.
+  ///
+  /// [embeddings] is a list of maps with keys:
+  ///   studentId, studentName, rollNumber, vector ([double])
+  Future<void> loadEnrolledEmbeddings(List<Map<String, dynamic>> embeddings) async {
+    await _methodChannel.invokeMethod<void>('loadEnrolledEmbeddings', {
+      'embeddings': embeddings,
+    });
+  }
+
+  /// Sends a JPEG image to the native plugin, detects the face in it, and
+  /// returns the embedding vector as [List<double>].
+  ///
+  /// Throws a [PlatformException] if no face is found or the model fails.
+  /// Returns an empty list on web (native model not available).
+  Future<List<double>> extractEmbeddingFromImage(Uint8List jpegBytes) async {
+    if (kIsWeb) return const [];
+    final raw = await _methodChannel.invokeMethod<List<dynamic>>(
+      'extractEmbeddingFromImage',
+      {'jpegBytes': jpegBytes},
+    );
+    return raw?.cast<double>() ?? const [];
+  }
+
   Map<String, dynamic> _castMap(dynamic raw) {
-    if (raw is Map<String, dynamic>) {
-      return raw;
-    }
-    if (raw is Map) {
-      return raw.map((key, value) => MapEntry(key.toString(), value));
-    }
+    if (raw is Map<String, dynamic>) return raw;
+    if (raw is Map) return raw.map((k, v) => MapEntry(k.toString(), v));
     throw PlatformException(code: 'invalid_payload', message: 'Recognition payload is not a map');
   }
 }

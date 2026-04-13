@@ -7,7 +7,7 @@ from app.api.deps import require_admin
 from app.core.database import get_db
 from app.models.face_embedding import FaceEmbedding
 from app.models.student import Student
-from app.schemas.embedding import EmbeddingCreate, EmbeddingDebugResponse, EmbeddingResponse
+from app.schemas.embedding import EmbeddingBulkItem, EmbeddingCreate, EmbeddingDebugResponse, EmbeddingResponse
 from app.schemas.student import (
     StudentCreate,
     StudentEnrollmentRequest,
@@ -149,6 +149,41 @@ def get_embeddings_debug(student_id: str, db: Session = Depends(get_db), _: obje
     if not student:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
     return list(db.scalars(select(FaceEmbedding).where(FaceEmbedding.student_id == student_id)).all())
+
+
+@router.get("/embeddings/all", response_model=list[EmbeddingBulkItem])
+def list_all_embeddings_for_device(
+    db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
+) -> list[EmbeddingBulkItem]:
+    """Return every embedding with student info for device-side face matching.
+
+    Only includes active students. Vectors are normalized (unit length).
+    """
+    rows = db.execute(
+        select(
+            FaceEmbedding.id,
+            FaceEmbedding.student_id,
+            FaceEmbedding.vector,
+            FaceEmbedding.quality_score,
+            Student.full_name,
+            Student.roll_number,
+        )
+        .join(Student, Student.id == FaceEmbedding.student_id)
+        .where(Student.is_active.is_(True))
+        .order_by(FaceEmbedding.quality_score.desc())
+    ).all()
+    return [
+        EmbeddingBulkItem(
+            embedding_id=r.id,
+            student_id=r.student_id,
+            student_name=r.full_name,
+            roll_number=r.roll_number,
+            vector=r.vector,
+            quality_score=r.quality_score,
+        )
+        for r in rows
+    ]
 
 
 @router.delete("/embeddings/{embedding_id}", status_code=status.HTTP_204_NO_CONTENT)

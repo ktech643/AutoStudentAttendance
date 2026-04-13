@@ -8,6 +8,11 @@ abstract class RecognitionSource {
   Stream<RecognitionEvent> events();
   Future<void> start(AttendanceThresholds thresholds);
   Future<void> stop();
+
+  /// Pushes enrolled embeddings to the recognition engine so matching can be
+  /// done on-device without network calls during recognition.
+  /// Pass an empty list to clear all enrolled templates.
+  Future<void> loadEnrolledEmbeddings(List<Map<String, dynamic>> embeddings);
 }
 
 class PlatformRecognitionSource implements RecognitionSource {
@@ -27,13 +32,15 @@ class PlatformRecognitionSource implements RecognitionSource {
   Future<void> stop() async {
     await _platformService.stopRecognition();
   }
+
+  @override
+  Future<void> loadEnrolledEmbeddings(List<Map<String, dynamic>> embeddings) async {
+    await _platformService.loadEnrolledEmbeddings(embeddings);
+  }
 }
 
 class SimulatedRecognitionSource implements RecognitionSource {
-  SimulatedRecognitionSource(
-    this._simulatedService,
-    this._studentPool,
-  );
+  SimulatedRecognitionSource(this._simulatedService, this._studentPool);
 
   final SimulatedRecognitionService _simulatedService;
   final List<Student> Function() _studentPool;
@@ -48,7 +55,10 @@ class SimulatedRecognitionSource implements RecognitionSource {
   }
 
   @override
-  Future<void> stop() async {
-    _simulatedService.stop();
+  Future<void> stop() async => _simulatedService.stop();
+
+  @override
+  Future<void> loadEnrolledEmbeddings(List<Map<String, dynamic>> embeddings) async {
+    // Simulated source does not use embeddings; its student pool is set in start().
   }
 }

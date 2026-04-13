@@ -3,6 +3,7 @@ import Foundation
 struct MatchCandidate {
   let studentId: String
   let studentName: String
+  let rollNumber: String
   let similarity: Double
   let confidence: Double
 }
@@ -18,42 +19,42 @@ final class FaceMatcher {
     embeddingStore.reload()
   }
 
+  func loadEmbeddings(_ list: [[String: Any]]) {
+    embeddingStore.loadFromList(list)
+  }
+
   func bestMatch(for query: [Float]) -> MatchCandidate? {
-    let candidates = scoreCandidates(for: query, topK: 1)
-    return candidates.first
+    return topCandidates(for: query, topK: 1).first
   }
 
   func topCandidates(for query: [Float], topK: Int = 3) -> [MatchCandidate] {
-    return scoreCandidates(for: query, topK: topK)
-  }
-
-  private func scoreCandidates(for query: [Float], topK: Int) -> [MatchCandidate] {
-    let normalized = normalize(query)
+    let normalized = normalizeL2(query)
     let enrolled = embeddingStore.allEmbeddings()
-    let scored = enrolled.map { item in
-      let score = cosineSimilarity(normalized, normalize(item.vector))
+    guard !enrolled.isEmpty else { return [] }
+    let scored = enrolled.map { item -> MatchCandidate in
+      let sim = cosineSimilarity(normalized, normalizeL2(item.vector))
       return MatchCandidate(
         studentId: item.studentId,
         studentName: item.studentName,
-        similarity: score,
-        confidence: score
+        rollNumber: item.rollNumber,
+        similarity: sim,
+        confidence: sim
       )
     }.sorted { $0.similarity > $1.similarity }
     return Array(scored.prefix(topK))
   }
 
   private func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Double {
-    guard a.count == b.count else { return 0.0 }
+    let len = min(a.count, b.count)
+    guard len > 0 else { return 0.0 }
     var dot: Float = 0
-    for i in 0..<a.count {
-      dot += a[i] * b[i]
-    }
+    for i in 0..<len { dot += a[i] * b[i] }
     return Double(dot)
   }
 
-  private func normalize(_ vector: [Float]) -> [Float] {
-    let norm = sqrt(vector.reduce(0) { $0 + $1 * $1 })
-    guard norm > 0 else { return vector }
-    return vector.map { $0 / norm }
+  private func normalizeL2(_ v: [Float]) -> [Float] {
+    let norm = sqrt(v.reduce(0) { $0 + $1 * $1 })
+    guard norm > 1e-6 else { return v }
+    return v.map { $0 / norm }
   }
 }

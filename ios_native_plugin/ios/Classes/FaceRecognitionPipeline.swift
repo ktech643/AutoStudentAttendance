@@ -51,6 +51,10 @@ final class FaceRecognitionPipeline: NSObject {
     matcher.reloadEmbeddings()
   }
 
+  func loadEnrolledEmbeddings(_ list: [[String: Any]]) {
+    matcher.loadEmbeddings(list)
+  }
+
   func start() {
     configureCaptureSessionIfNeeded()
     if !captureSession.isRunning {
@@ -65,9 +69,7 @@ final class FaceRecognitionPipeline: NSObject {
   }
 
   private func configureCaptureSessionIfNeeded() {
-    if !captureSession.inputs.isEmpty {
-      return
-    }
+    if !captureSession.inputs.isEmpty { return }
 
     captureSession.beginConfiguration()
     captureSession.sessionPreset = .high
@@ -79,15 +81,11 @@ final class FaceRecognitionPipeline: NSObject {
 
     do {
       let input = try AVCaptureDeviceInput(device: device)
-      if captureSession.canAddInput(input) {
-        captureSession.addInput(input)
-      }
+      if captureSession.canAddInput(input) { captureSession.addInput(input) }
       videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange]
       videoOutput.alwaysDiscardsLateVideoFrames = true
       videoOutput.setSampleBufferDelegate(self, queue: videoQueue)
-      if captureSession.canAddOutput(videoOutput) {
-        captureSession.addOutput(videoOutput)
-      }
+      if captureSession.canAddOutput(videoOutput) { captureSession.addOutput(videoOutput) }
       if let connection = videoOutput.connection(with: .video), connection.isVideoOrientationSupported {
         connection.videoOrientation = .portrait
       }
@@ -101,24 +99,21 @@ final class FaceRecognitionPipeline: NSObject {
 
   private func processFrame(_ sampleBuffer: CMSampleBuffer) {
     let now = Date()
-    let elapsed = now.timeIntervalSince(lastProcessedAt)
-    if elapsed < (1.0 / 8.0) {
-      return
-    }
+    guard now.timeIntervalSince(lastProcessedAt) >= (1.0 / 12.0) else { return }
     lastProcessedAt = now
     frameCount += 1
 
     let t0 = Date()
     let observations = detectFaces(sampleBuffer: sampleBuffer)
     let detectionMs = Date().timeIntervalSince(t0) * 1000
-    guard !observations.isEmpty else {
-      return
-    }
+    guard !observations.isEmpty else { return }
 
     for tracked in observations {
       let trackId = tracked.trackId
       let observation = tracked.observation
       let quality = qualityGate.evaluate(observation: observation, sampleBuffer: sampleBuffer, thresholds: thresholds)
+
+      // Always emit an event with the bounding box so the overlay tracks in real time.
       guard quality.accepted else {
         rejectedByQuality += 1
         emitEvent(
@@ -138,9 +133,7 @@ final class FaceRecognitionPipeline: NSObject {
         continue
       }
 
-      guard let faceImage = cropFace(observation: observation, sampleBuffer: sampleBuffer) else {
-        continue
-      }
+      guard let faceImage = cropFace(observation: observation, sampleBuffer: sampleBuffer) else { continue }
 
       let tEmbedding = Date()
       let embedding: [Float]
@@ -187,50 +180,34 @@ final class FaceRecognitionPipeline: NSObject {
   private func detectFaces(sampleBuffer: CMSampleBuffer) -> [(trackId: Int, observation: VNFaceObservation)] {
     let detectRequest = VNDetectFaceRectanglesRequest()
     do {
-      if #available(iOS 14.0, *) {
-        let imageRequestHandler = VNImageRequestHandler(cmSampleBuffer: sampleBuffer, orientation: .leftMirrored, options: [:])
-        try imageRequestHandler.perform([detectRequest])
-      } else {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-          return []
-        }
-        let imageRequestHandler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .leftMirrored, options: [:])
-        try imageRequestHandler.perform([detectRequest])
-      }
-    } catch {
-      return []
-    }
+      let handler = VNImageRequestHandler(cmSampleBuffer: sampleBuffer, orientation: .leftMirrored, options: [:])
+      try handler.perform([detectRequest])
+    } catch { return [] }
+
     guard let detections = detectRequest.results as? [VNFaceObservation], !detections.isEmpty else {
       trackedObservations.removeAll()
       return []
     }
 
-    // Lightweight matching by nearest box center to keep track IDs stable across frames.
     var assignments: [(Int, VNFaceObservation)] = []
     var usedTrackIds = Set<Int>()
     for face in detections {
-      let centerX = face.boundingBox.midX
-      let centerY = face.boundingBox.midY
-      var chosenTrackId: Int?
-      var bestDistance: CGFloat = 999
-      for (trackId, prev) in trackedObservations {
-        if usedTrackIds.contains(trackId) { continue }
-        let dx = prev.boundingBox.midX - centerX
-        let dy = prev.boundingBox.midY - centerY
-        let dist = sqrt(dx * dx + dy * dy)
-        if dist < bestDistance {
-          bestDistance = dist
-          chosenTrackId = trackId
-        }
+      let cx = face.boundingBox.midX
+      let cy = face.boundingBox.midY
+      var chosen: Int?
+      var bestDist: CGFloat = 999
+      for (tid, prev) in trackedObservations {
+        guard !usedTrackIds.contains(tid) else { continue }
+        let dx = prev.boundingBox.midX - cx
+        let dy = prev.boundingBox.midY - cy
+        let d = sqrt(dx * dx + dy * dy)
+        if d < bestDist { bestDist = d; chosen = tid }
       }
-      if let trackId = chosenTrackId, bestDistance < 0.18 {
-        assignments.append((trackId, face))
-        usedTrackIds.insert(trackId)
+      if let tid = chosen, bestDist < 0.20 {
+        assignments.append((tid, face)); usedTrackIds.insert(tid)
       } else {
-        let trackId = nextTrackId
-        nextTrackId += 1
-        assignments.append((trackId, face))
-        usedTrackIds.insert(trackId)
+        let tid = nextTrackId; nextTrackId += 1
+        assignments.append((tid, face)); usedTrackIds.insert(tid)
       }
     }
 
@@ -239,12 +216,8 @@ final class FaceRecognitionPipeline: NSObject {
   }
 
   private func shouldSuppress(trackId: Int, studentId: String, now: Date) -> Bool {
-    if let lastTrack = trackLastDecisionAt[trackId], now.timeIntervalSince(lastTrack) < Double(thresholds.trackCooldownSeconds) {
-      return true
-    }
-    if let lastStudent = studentLastMarkAt[studentId], now.timeIntervalSince(lastStudent) < Double(thresholds.studentCooldownSeconds) {
-      return true
-    }
+    if let last = trackLastDecisionAt[trackId], now.timeIntervalSince(last) < Double(thresholds.trackCooldownSeconds) { return true }
+    if let last = studentLastMarkAt[studentId], now.timeIntervalSince(last) < Double(thresholds.studentCooldownSeconds) { return true }
     trackLastDecisionAt[trackId] = now
     studentLastMarkAt[studentId] = now
     return false
@@ -253,15 +226,15 @@ final class FaceRecognitionPipeline: NSObject {
   private func cropFace(observation: VNFaceObservation, sampleBuffer: CMSampleBuffer) -> CGImage? {
     guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
     let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-    let width = ciImage.extent.width
-    let height = ciImage.extent.height
-
+    let w = ciImage.extent.width
+    let h = ciImage.extent.height
     let box = observation.boundingBox
+    // Vision uses bottom-left origin; CIImage uses bottom-left too.
     let rect = CGRect(
-      x: box.origin.x * width,
-      y: (1 - box.origin.y - box.size.height) * height,
-      width: box.size.width * width,
-      height: box.size.height * height
+      x: box.origin.x * w,
+      y: (1.0 - box.origin.y - box.size.height) * h,
+      width: box.size.width * w,
+      height: box.size.height * h
     )
     let expanded = rect.insetBy(dx: -rect.width * 0.15, dy: -rect.height * 0.15).intersection(ciImage.extent)
     guard !expanded.isNull else { return nil }
@@ -285,24 +258,22 @@ final class FaceRecognitionPipeline: NSObject {
     if debugMode {
       NSLog(
         "face_pipeline frame=%d attempts=%d matches=%d rejected=%d dup=%d detect=%.2f embed=%.2f match=%.2f",
-        frameCount,
-        recognitionAttempts,
-        successfulMatches,
-        rejectedByQuality,
-        duplicatePrevented,
-        detectionMs,
-        embeddingMs,
-        matchingMs
+        frameCount, recognitionAttempts, successfulMatches, rejectedByQuality, duplicatePrevented,
+        detectionMs, embeddingMs, matchingMs
       )
     }
+
+    // Convert Vision bottom-left origin to display top-left origin for Flutter.
+    let displayY = 1.0 - box.origin.y - box.height
 
     let payload = RecognitionEventPayload(
       trackId: trackId,
       matchedStudentId: matched?.studentId,
       matchedStudentName: matched?.studentName,
+      matchedStudentRollNumber: matched?.rollNumber,
       confidence: confidence,
       similarity: similarity,
-      faceBox: FaceBox(x: box.origin.x, y: box.origin.y, w: box.width, h: box.height),
+      faceBox: FaceBox(x: box.origin.x, y: displayY, w: box.width, h: box.height),
       qualityScore: quality,
       timestamp: ISO8601DateFormatter().string(from: Date()),
       imageAcceptedForRecognition: accepted,
@@ -311,25 +282,18 @@ final class FaceRecognitionPipeline: NSObject {
         RecognitionCandidatePayload(
           studentId: $0.studentId,
           studentName: $0.studentName,
+          rollNumber: $0.rollNumber,
           similarity: $0.similarity,
           confidence: $0.confidence
         )
       }
     )
-    DispatchQueue.main.async { [onEvent] in
-      onEvent(payload)
-    }
+    DispatchQueue.main.async { [onEvent] in onEvent(payload) }
   }
 }
 
 extension FaceRecognitionPipeline: AVCaptureVideoDataOutputSampleBufferDelegate {
-  func captureOutput(
-    _ output: AVCaptureOutput,
-    didOutput sampleBuffer: CMSampleBuffer,
-    from connection: AVCaptureConnection
-  ) {
-    processingQueue.async { [weak self] in
-      self?.processFrame(sampleBuffer)
-    }
+  func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+    processingQueue.async { [weak self] in self?.processFrame(sampleBuffer) }
   }
 }

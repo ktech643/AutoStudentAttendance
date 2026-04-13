@@ -17,4 +17,9 @@ abstract class StudentRepository {
     required List<double> qualityScores,
     String sourceType = 'enrollment_capture',
   });
+
+  /// Returns all enrolled embeddings from the server in the format expected
+  /// by the native recognition plugin's loadEnrolledEmbeddings channel method.
+  /// Keys per item: studentId, studentName, rollNumber, vector.
+  Future<List<Map<String, dynamic>>> fetchAllEmbeddingsForDevice();
 }

@@ -38,10 +38,10 @@ SPEC CHECKSUMS:
   camera_avfoundation: 968a9a5323c79a99c166ad9d7866bfd2047b5a9b
   connectivity_plus: cb623214f4e1f6ef8fe7403d580fdad517d2f7dd
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
-  ios_face_attendance_plugin: 1079c938890c533665653a5732492026291028e1
+  ios_face_attendance_plugin: f717a5d04e3785b743eeb26908fdcec110e61877
   permission_handler_apple: 4ed2196e43d0651e8ff7ca3483a069d469701f2d
   sqflite_darwin: 20b2a3a3b70e43edae938624ce550a3cbf66a3d0
 
-PODFILE CHECKSUM: 3c63482e143d1b91d2d2560aee9fb04ecc74ac7e
+PODFILE CHECKSUM: 58cde438acd1fdd96e20f6fa872bbea0238eeae6
 
 COCOAPODS: 1.16.2

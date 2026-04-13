@@ -20,18 +20,8 @@ final class QualityGate {
       return QualityGateResult(accepted: false, score: 0.2, reason: "face_too_small")
     }
 
-    let yaw: Double = {
-      if #available(iOS 15.0, *) {
-        return abs(observation.yaw?.doubleValue ?? 0.0)
-      }
-      return 0.0
-    }()
-    let pitch: Double = {
-      if #available(iOS 15.0, *) {
-        return abs(observation.pitch?.doubleValue ?? 0.0)
-      }
-      return 0.0
-    }()
+    let yaw = abs(observation.yaw?.doubleValue ?? 0.0)
+    let pitch = abs(observation.pitch?.doubleValue ?? 0.0)
     if yaw > thresholds.maxAbsYaw || pitch > thresholds.maxAbsPitch {
       return QualityGateResult(accepted: false, score: 0.3, reason: "pose_out_of_range")
     }

@@ -21,3 +21,14 @@ class EmbeddingResponse(BaseModel):
 
 class EmbeddingDebugResponse(EmbeddingResponse):
     vector: list[float]
+
+
+class EmbeddingBulkItem(BaseModel):
+    """One enrolled embedding with its student metadata — used for device-side matching."""
+
+    embedding_id: str
+    student_id: str
+    student_name: str
+    roll_number: str | None
+    vector: list[float]
+    quality_score: float

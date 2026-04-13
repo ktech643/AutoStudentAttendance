@@ -97,6 +97,7 @@ final kioskControllerProvider = StateNotifierProvider<KioskController, KioskStat
   final controller = KioskController(
     source: ref.watch(recognitionSourceProvider),
     attendanceRepository: ref.watch(attendanceRepositoryProvider),
+    studentRepository: ref.watch(studentRepositoryProvider),
     queueRepository: ref.watch(localQueueRepositoryProvider),
     syncService: ref.watch(syncServiceProvider),
     decisionEngine: RecognitionDecisionEngine(ref.watch(attendanceThresholdsProvider)),
@@ -111,6 +112,7 @@ class KioskController extends StateNotifier<KioskState> {
   KioskController({
     required RecognitionSource source,
     required AttendanceRepository attendanceRepository,
+    required StudentRepository studentRepository,
     required LocalQueueRepository queueRepository,
     required SyncService syncService,
     required RecognitionDecisionEngine decisionEngine,
@@ -119,6 +121,7 @@ class KioskController extends StateNotifier<KioskState> {
     required AppConfig appConfig,
   })  : _source = source,
         _attendanceRepository = attendanceRepository,
+        _studentRepository = studentRepository,
         _queueRepository = queueRepository,
         _syncService = syncService,
         _decisionEngine = decisionEngine,
@@ -133,6 +136,7 @@ class KioskController extends StateNotifier<KioskState> {
 
   final RecognitionSource _source;
   final AttendanceRepository _attendanceRepository;
+  final StudentRepository _studentRepository;
   final LocalQueueRepository _queueRepository;
   final SyncService _syncService;
   final RecognitionDecisionEngine _decisionEngine;
@@ -156,6 +160,11 @@ class KioskController extends StateNotifier<KioskState> {
   }
 
   Future<void> startRecognition() async {
+    // Push the latest enrolled embeddings to the native plugin so matching
+    // can happen entirely on-device without per-frame network calls.
+    if (!_appConfig.simulatedRecognition) {
+      await _loadEmbeddingsToNative();
+    }
     await _source.start(_thresholdsProvider.state);
     _recognitionSubscription?.cancel();
     _recognitionSubscription = _source.events().listen(_onRecognitionEvent);
@@ -163,6 +172,19 @@ class KioskController extends StateNotifier<KioskState> {
       recognitionActive: true,
       lastStatusMessage: 'Recognition started — waiting for camera preview',
     );
+  }
+
+  Future<void> _loadEmbeddingsToNative() async {
+    try {
+      final embeddings = await _studentRepository.fetchAllEmbeddingsForDevice();
+      await _source.loadEnrolledEmbeddings(embeddings);
+      state = state.copyWith(
+        lastStatusMessage: 'Loaded ${embeddings.length} enrolled embeddings',
+      );
+    } catch (e) {
+      // Non-fatal: recognition will still work but with empty embedding store.
+      state = state.copyWith(lastStatusMessage: 'Warning: could not load embeddings ($e)');
+    }
   }
 
   /// Call when [FaceCameraView] (or native surface) is ready / lost.

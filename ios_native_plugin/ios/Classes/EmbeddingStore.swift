@@ -3,46 +3,67 @@ import Foundation
 struct EnrolledEmbedding {
   let studentId: String
   let studentName: String
+  let rollNumber: String
   let vector: [Float]
 }
 
 protocol EmbeddingStore {
   func allEmbeddings() -> [EnrolledEmbedding]
   func reload()
+  func loadFromList(_ list: [[String: Any]])
 }
 
 final class InMemoryEmbeddingStore: EmbeddingStore {
   private var embeddings: [EnrolledEmbedding] = []
-  private let queue = DispatchQueue(label: "face.attendance.embedding.store", qos: .userInitiated)
+  private let queue = DispatchQueue(label: "face.attendance.embedding.store", attributes: .concurrent)
 
-  init() {
-    // Example seed records for dev/simulated mode.
-    embeddings = [
-      EnrolledEmbedding(studentId: "student-11", studentName: "Sim Student 1", vector: Self.randomUnitVector(seed: 11)),
-      EnrolledEmbedding(studentId: "student-12", studentName: "Sim Student 2", vector: Self.randomUnitVector(seed: 12)),
-      EnrolledEmbedding(studentId: "student-13", studentName: "Sim Student 3", vector: Self.randomUnitVector(seed: 13))
-    ]
-  }
+  init() {}
 
   func allEmbeddings() -> [EnrolledEmbedding] {
     return queue.sync { embeddings }
   }
 
   func reload() {
-    queue.sync {
-      // TODO: Pull latest embeddings from secure local cache or backend sync layer.
-      // Keep vectors and student mapping in memory for low-latency matching.
+    // Called by Flutter's reloadEmbeddings channel method.
+    // The real refresh is via loadFromList after fetching from the server.
+  }
+
+  /// Replaces the in-memory store with embeddings received from Flutter (fetched from the backend).
+  /// Expected keys per item: studentId (String), studentName (String),
+  /// rollNumber (String?), vector ([Double] or [Float]).
+  func loadFromList(_ list: [[String: Any]]) {
+    var loaded: [EnrolledEmbedding] = []
+    for item in list {
+      guard
+        let studentId = item["studentId"] as? String,
+        let studentName = item["studentName"] as? String,
+        let vectorAny = item["vector"] as? [Any], !vectorAny.isEmpty
+      else { continue }
+      let rollNumber = item["rollNumber"] as? String ?? ""
+      var floats: [Float] = []
+      floats.reserveCapacity(vectorAny.count)
+      for v in vectorAny {
+        if let d = v as? Double { floats.append(Float(d)) }
+        else if let f = v as? Float { floats.append(f) }
+      }
+      guard !floats.isEmpty else { continue }
+      loaded.append(
+        EnrolledEmbedding(
+          studentId: studentId,
+          studentName: studentName,
+          rollNumber: rollNumber,
+          vector: normalizeL2(floats)
+        )
+      )
+    }
+    queue.async(flags: .barrier) { [weak self] in
+      self?.embeddings = loaded
     }
   }
 
-  private static func randomUnitVector(seed: Int) -> [Float] {
-    var values: [Float] = []
-    values.reserveCapacity(128)
-    for i in 0..<128 {
-      let raw = Float(((seed + 31) * (i + 7)) % 503) / 503.0
-      values.append(raw * 2.0 - 1.0)
-    }
-    let norm = sqrt(values.reduce(0) { $0 + $1 * $1 })
-    return norm > 0 ? values.map { $0 / norm } : values
+  private func normalizeL2(_ v: [Float]) -> [Float] {
+    let norm = sqrt(v.reduce(0) { $0 + $1 * $1 })
+    guard norm > 1e-6 else { return v }
+    return v.map { $0 / norm }
   }
 }

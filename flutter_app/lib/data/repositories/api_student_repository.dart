@@ -74,4 +74,20 @@ class ApiStudentRepository implements StudentRepository {
       },
     );
   }
+
+  @override
+  Future<List<Map<String, dynamic>>> fetchAllEmbeddingsForDevice() async {
+    final response = await _apiClient.dio.get<List<dynamic>>('/embeddings/all');
+    final items = response.data ?? const [];
+    return items.whereType<Map<dynamic, dynamic>>().map((raw) {
+      final item = raw.map((k, v) => MapEntry(k.toString(), v));
+      final vectorRaw = item['vector'] as List<dynamic>? ?? const [];
+      return <String, dynamic>{
+        'studentId': item['student_id'] as String? ?? '',
+        'studentName': item['student_name'] as String? ?? '',
+        'rollNumber': item['roll_number'] as String? ?? '',
+        'vector': vectorRaw.map((v) => (v as num).toDouble()).toList(growable: false),
+      };
+    }).toList(growable: false);
+  }
 }
