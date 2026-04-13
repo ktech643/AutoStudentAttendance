@@ -1,0 +1,14 @@
+name: ios_face_attendance_plugin
+description: iOS native face attendance plugin for Flutter.
+version: 0.1.0
+publish_to: "none"
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+flutter:
+  plugin:
+    platforms:
+      ios:
+        pluginClass: FaceAttendancePlugin
