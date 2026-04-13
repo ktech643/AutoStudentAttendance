@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.venv/
+
+# Flutter/Dart
+.dart_tool/
+.packages
+build/
+
+# iOS
+Pods/
+DerivedData/
+
+# Env and local
+.env
+.DS_Store
+
+# Local databases
+*.db
