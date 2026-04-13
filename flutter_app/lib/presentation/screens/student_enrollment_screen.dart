@@ -1081,6 +1081,10 @@ _FrameData _toFrameData(CameraImage f) => _FrameData(
     );
 
 /// Converts a raw CameraImage to JPEG in a compute isolate (no UI thread block).
+///
+/// On iOS the front-camera stream is delivered in landscape orientation (raw
+/// sensor data — width > height).  We rotate 90° clockwise so the JPEG is
+/// upright and Vision's face detector sees the face the right way up.
 Uint8List? _frameToJpeg(_FrameData d) {
   try {
     img.Image image;
@@ -1105,8 +1109,7 @@ Uint8List? _frameToJpeg(_FrameData d) {
           final u = uP.bytes[uvIdx] - 128;
           final v = vP.bytes[uvIdx] - 128;
           image.setPixelRgb(
-            x,
-            y,
+            x, y,
             (yv + 1.402 * v).clamp(0, 255).toInt(),
             (yv - 0.344136 * u - 0.714136 * v).clamp(0, 255).toInt(),
             (yv + 1.772 * u).clamp(0, 255).toInt(),
@@ -1115,6 +1118,11 @@ Uint8List? _frameToJpeg(_FrameData d) {
       }
     } else {
       return null;
+    }
+    // iOS sensor delivers landscape buffers even in portrait UI.
+    // Rotate 90° clockwise → upright portrait image for face detection.
+    if (image.width > image.height) {
+      image = img.copyRotate(image, angle: 90);
     }
     return Uint8List.fromList(img.encodeJpg(image, quality: 88));
   } catch (_) {

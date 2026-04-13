@@ -51,6 +51,23 @@ class _AttendanceKioskScreenState extends ConsumerState<AttendanceKioskScreen> {
     final kioskState = ref.watch(kioskControllerProvider);
     final controller = ref.read(kioskControllerProvider.notifier);
 
+    // Show a SnackBar toast whenever attendance is auto-marked.
+    ref.listen<KioskState>(kioskControllerProvider, (previous, next) {
+      if (next.markedToast != null &&
+          next.markedToast != previous?.markedToast) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(next.markedToast!),
+            backgroundColor: Colors.green.shade700,
+            behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+        // Clear immediately so it doesn't retrigger on rebuilds.
+        controller.clearMarkedToast();
+      }
+    });
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Attendance Kiosk'),

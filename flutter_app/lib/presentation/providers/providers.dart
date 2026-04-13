@@ -233,6 +233,12 @@ class KioskController extends StateNotifier<KioskState> {
     _decisionEngine.updateThresholds(thresholds);
   }
 
+  /// Called by the kiosk screen right after displaying the toast so it doesn't
+  /// re-trigger on the next widget rebuild.
+  void clearMarkedToast() {
+    state = state.copyWith(clearMarkedToast: true);
+  }
+
   Future<void> _onRecognitionEvent(RecognitionEvent event) async {
     state = state.copyWith(
       latestRecognition: event,
@@ -252,6 +258,12 @@ class KioskController extends StateNotifier<KioskState> {
       if (submitted) {
         state = state.copyWith(successfulMatches: state.successfulMatches + 1);
         _scheduleAttendanceBanner(event, 'Attendance marked');
+        // Confidence is in [0,1]; show the toast only when the match is solid (≥ 85 %).
+        final pct = (event.similarity * 100).toStringAsFixed(0);
+        final name = event.matchedStudentName ?? event.matchedStudentId ?? 'Unknown';
+        state = state.copyWith(
+          markedToast: '✓ Attendance marked — $name ($pct% match)',
+        );
       }
       _analyticsHook.track('attendance_auto_marked', properties: {'studentId': event.matchedStudentId});
       return;

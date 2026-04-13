@@ -19,6 +19,7 @@ class KioskState {
     this.attendanceBannerName,
     this.attendanceBannerRoll,
     this.attendanceBannerStatus,
+    this.markedToast,
   });
 
   final bool isOnline;
@@ -37,6 +38,9 @@ class KioskState {
   final String? attendanceBannerName;
   final String? attendanceBannerRoll;
   final String? attendanceBannerStatus;
+  /// One-shot toast message shown after an auto-mark; the kiosk screen clears
+  /// it immediately after displaying so it only fires once.
+  final String? markedToast;
 
   KioskState copyWith({
     bool? isOnline,
@@ -56,6 +60,8 @@ class KioskState {
     String? attendanceBannerRoll,
     String? attendanceBannerStatus,
     bool clearAttendanceBanner = false,
+    String? markedToast,
+    bool clearMarkedToast = false,
   }) {
     return KioskState(
       isOnline: isOnline ?? this.isOnline,
@@ -71,9 +77,16 @@ class KioskState {
       duplicatePrevented: duplicatePrevented ?? this.duplicatePrevented,
       queuedOffline: queuedOffline ?? this.queuedOffline,
       lastStatusMessage: lastStatusMessage ?? this.lastStatusMessage,
-      attendanceBannerName: clearAttendanceBanner ? null : (attendanceBannerName ?? this.attendanceBannerName),
-      attendanceBannerRoll: clearAttendanceBanner ? null : (attendanceBannerRoll ?? this.attendanceBannerRoll),
-      attendanceBannerStatus: clearAttendanceBanner ? null : (attendanceBannerStatus ?? this.attendanceBannerStatus),
+      attendanceBannerName: clearAttendanceBanner
+          ? null
+          : (attendanceBannerName ?? this.attendanceBannerName),
+      attendanceBannerRoll: clearAttendanceBanner
+          ? null
+          : (attendanceBannerRoll ?? this.attendanceBannerRoll),
+      attendanceBannerStatus: clearAttendanceBanner
+          ? null
+          : (attendanceBannerStatus ?? this.attendanceBannerStatus),
+      markedToast: clearMarkedToast ? null : (markedToast ?? this.markedToast),
     );
   }
 }
