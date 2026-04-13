@@ -18,24 +18,23 @@ import '../providers/providers.dart';
 // Data
 // ---------------------------------------------------------------------------
 
-enum _EnrollmentPhase { enterDetails, captureFace, done }
+enum _Phase { enterDetails, captureFace, done }
 
-class _EnrollmentSample {
-  const _EnrollmentSample({
-    required this.qualityScore,
+class _Sample {
+  const _Sample({
     required this.accepted,
     required this.hint,
     required this.embedding,
+    required this.qualityScore,
     this.jpegBytes,
     this.thumbnail,
   });
-
-  final double qualityScore;
   final bool accepted;
   final String hint;
   final List<double> embedding;
+  final double qualityScore;
   final Uint8List? jpegBytes;
-  final Uint8List? thumbnail; // small JPEG for UI preview
+  final Uint8List? thumbnail;
 }
 
 // ---------------------------------------------------------------------------
@@ -46,81 +45,100 @@ class StudentEnrollmentScreen extends ConsumerStatefulWidget {
   const StudentEnrollmentScreen({super.key});
 
   @override
-  ConsumerState<StudentEnrollmentScreen> createState() => _StudentEnrollmentScreenState();
+  ConsumerState<StudentEnrollmentScreen> createState() =>
+      _StudentEnrollmentScreenState();
 }
 
-class _StudentEnrollmentScreenState extends ConsumerState<StudentEnrollmentScreen>
+class _StudentEnrollmentScreenState
+    extends ConsumerState<StudentEnrollmentScreen>
     with TickerProviderStateMixin {
-  _EnrollmentPhase _phase = _EnrollmentPhase.enterDetails;
+  _Phase _phase = _Phase.enterDetails;
 
-  final _nameController = TextEditingController();
-  final _rollController = TextEditingController();
-  final _classController = TextEditingController(text: '1');
-  final _sectionController = TextEditingController(text: 'A');
+  final _nameCtrl = TextEditingController();
+  final _rollCtrl = TextEditingController();
+  final _classCtrl = TextEditingController(text: '1');
+  final _secCtrl = TextEditingController(text: 'A');
 
-  Student? _createdStudent;
-  final List<_EnrollmentSample> _samples = [];
-  final Random _random = Random();
+  Student? _student;
+  final List<_Sample> _samples = [];
+  final _rng = Random();
 
-  CameraController? _cameraController;
-  // Latest frame from image stream — used for face detection + capture.
-  CameraImage? _latestFrame;
+  CameraController? _cam;
+  CameraImage? _latestFrame; // continuously updated from image stream
 
   bool _creatingStudent = false;
   bool _isSubmitting = false;
 
-  // ---- Face guidance state ----
-  Timer? _guidanceTimer;
+  // ---- guidance ----
+  Timer? _analysisTimer;
   bool _analyzing = false;
-  // Normalised face box (0-1, top-left origin); null = no face
-  Map<String, dynamic>? _faceBox;
+
+  Map<String, dynamic>? _faceBox; // detected bounding box (0-1, top-left)
   String _guidanceText = 'Position your face in the circle';
   Color _guideColor = Colors.white54;
-  // Countdown to auto-capture (0 = ready, counts down from 3)
+
+  // ---- countdown / capture gate ----
+  /// Prevents re-entry: set to true from when countdown fires until after
+  /// the captured frame has been fully processed.
+  bool _capturingNow = false;
+  int _goodFrames = 0; // consecutive "position good" analysis frames
   int _countdown = 0;
   Timer? _countdownTimer;
-  int _goodFramesInRow = 0;
 
-  // ---- Flash feedback animation ----
-  late final AnimationController _captureFlashCtrl = AnimationController(
-    vsync: this, duration: const Duration(milliseconds: 350),
-  );
-  late final Animation<double> _captureFlashAnim =
-      CurvedAnimation(parent: _captureFlashCtrl, curve: Curves.easeOut);
+  // ---- capture flash ----
+  late final AnimationController _flashCtrl = AnimationController(
+    vsync: this, duration: const Duration(milliseconds: 300));
+  late final Animation<double> _flashAnim =
+      CurvedAnimation(parent: _flashCtrl, curve: Curves.easeOut);
 
-  bool get _nativeAvailable => !kIsWeb && Platform.isIOS;
-  bool get _canSubmit =>
-      !_isSubmitting && _createdStudent != null && _acceptedCount >= 3;
+  static const _angles = [
+    'Face forward',
+    'Turn slightly left',
+    'Turn slightly right',
+    'Chin up slightly',
+    'Chin down slightly',
+  ];
+  static const _maxSamples = 5;
+
+  bool get _nativeAvail => !kIsWeb && Platform.isIOS;
+  bool get _canSave => !_isSubmitting && _student != null && _acceptedCount >= 3;
   int get _acceptedCount => _samples.where((s) => s.accepted).length;
+  int get _nextAngleIndex => _acceptedCount.clamp(0, _angles.length - 1);
 
-  // ---- Required angles ----
-  static const _requiredAngles = ['Front', 'Slight left', 'Slight right', 'Chin up', 'Chin down'];
+  // ---------------------------------------------------------------------------
+  // Lifecycle
+  // ---------------------------------------------------------------------------
 
   @override
   void dispose() {
-    _guidanceTimer?.cancel();
+    _analysisTimer?.cancel();
     _countdownTimer?.cancel();
-    _captureFlashCtrl.dispose();
-    _nameController.dispose();
-    _rollController.dispose();
-    _classController.dispose();
-    _sectionController.dispose();
-    unawaited(_cameraController?.stopImageStream().catchError((_) {}));
-    _cameraController?.dispose();
+    _flashCtrl.dispose();
+    _nameCtrl.dispose();
+    _rollCtrl.dispose();
+    _classCtrl.dispose();
+    _secCtrl.dispose();
+    _stopCamera();
     super.dispose();
   }
 
+  void _stopCamera() {
+    unawaited(_cam?.stopImageStream().catchError((_) {}));
+    _cam?.dispose();
+    _cam = null;
+  }
+
   // ---------------------------------------------------------------------------
-  // Phase 1 — enter details
+  // Phase 1 — details
   // ---------------------------------------------------------------------------
 
   Future<void> _goToCapture(StudentRepository repo) async {
-    final name = _nameController.text.trim();
-    final roll = _rollController.text.trim();
-    final cls = _classController.text.trim();
-    final sec = _sectionController.text.trim();
+    final name = _nameCtrl.text.trim();
+    final roll = _rollCtrl.text.trim();
+    final cls = _classCtrl.text.trim();
+    final sec = _secCtrl.text.trim();
     if (name.isEmpty || roll.isEmpty || cls.isEmpty || sec.isEmpty) {
-      _snack('Please fill in all fields');
+      _snack('Please fill in all fields', Colors.orangeAccent);
       return;
     }
     setState(() => _creatingStudent = true);
@@ -131,21 +149,19 @@ class _StudentEnrollmentScreenState extends ConsumerState<StudentEnrollmentScree
       ref.invalidate(studentListProvider);
       setState(() {
         _creatingStudent = false;
-        _createdStudent = student;
-        _phase = _EnrollmentPhase.captureFace;
+        _student = student;
+        _phase = _Phase.captureFace;
         _samples.clear();
-        _guidanceText = 'Position your face in the circle';
-        _guideColor = Colors.white54;
       });
       await _startCamera();
     } catch (e) {
       setState(() => _creatingStudent = false);
-      _snack('Could not create student: $e');
+      _snack('Could not create student: $e', Colors.redAccent);
     }
   }
 
   // ---------------------------------------------------------------------------
-  // Phase 2 — camera + face guidance
+  // Camera
   // ---------------------------------------------------------------------------
 
   Future<void> _startCamera() async {
@@ -154,51 +170,50 @@ class _StudentEnrollmentScreenState extends ConsumerState<StudentEnrollmentScree
       (c) => c.lensDirection == CameraLensDirection.front,
       orElse: () => cameras.first,
     );
-    final ctrl = CameraController(
-      front,
-      ResolutionPreset.high,
-      enableAudio: false,
-    );
+    final ctrl = CameraController(front, ResolutionPreset.high, enableAudio: false);
     await ctrl.initialize();
     await ctrl.setFlashMode(FlashMode.off);
-    await ctrl.startImageStream((frame) => _latestFrame = frame);
+    await ctrl.startImageStream((f) => _latestFrame = f);
     if (!mounted) { ctrl.dispose(); return; }
-    setState(() => _cameraController = ctrl);
-    // Start guidance analysis loop every 350 ms.
-    _guidanceTimer = Timer.periodic(const Duration(milliseconds: 350), (_) => _analyzeFrame());
+    setState(() => _cam = ctrl);
+    // Analysis loop — runs every 350 ms.
+    _analysisTimer = Timer.periodic(const Duration(milliseconds: 350), (_) => _analyzeFrame());
   }
 
+  // ---------------------------------------------------------------------------
+  // Face analysis
+  // ---------------------------------------------------------------------------
+
   Future<void> _analyzeFrame() async {
-    if (_analyzing || !mounted) return;
+    // Skip if already capturing or max reached.
+    if (_analyzing || _capturingNow || _acceptedCount >= _maxSamples) return;
     final frame = _latestFrame;
     if (frame == null) return;
     _analyzing = true;
     try {
-      Uint8List? jpeg;
-      if (_nativeAvailable) {
-        jpeg = await compute(_frameToJpeg, _frameData(frame));
-      }
-
       Map<String, dynamic> bounds = const {'detected': false};
-      if (jpeg != null && jpeg.isNotEmpty) {
-        bounds = await FaceAttendancePlatformService().detectFaceBounds(jpeg);
+      if (_nativeAvail) {
+        final jpeg = await compute(_frameToJpeg, _toFrameData(frame));
+        if (jpeg != null && jpeg.isNotEmpty) {
+          bounds = await FaceAttendancePlatformService().detectFaceBounds(jpeg);
+        }
       }
-
       if (!mounted) return;
-      _updateGuidance(bounds, jpeg);
+      _handleBounds(bounds);
     } finally {
       _analyzing = false;
     }
   }
 
-  void _updateGuidance(Map<String, dynamic> bounds, Uint8List? jpeg) {
+  void _handleBounds(Map<String, dynamic> bounds) {
     final detected = bounds['detected'] as bool? ?? false;
+
     if (!detected) {
-      _goodFramesInRow = 0;
+      _goodFrames = 0;
       _cancelCountdown();
       setState(() {
         _faceBox = null;
-        _guidanceText = 'Position your face in the circle';
+        _guidanceText = 'Position your face in the oval';
         _guideColor = Colors.redAccent;
       });
       return;
@@ -211,66 +226,78 @@ class _StudentEnrollmentScreenState extends ConsumerState<StudentEnrollmentScree
     final cx = x + w / 2;
     final cy = y + h / 2;
 
-    setState(() => _faceBox = bounds);
+    if (mounted) setState(() => _faceBox = bounds);
 
-    // Ideal: face between 30%-70% of frame width, centred within ±0.12
     String hint = '';
     Color color = Colors.greenAccent;
 
-    if (w < 0.28) {
-      hint = 'Move closer ↑';
+    if (w < 0.27) {
+      hint = 'Move closer  ↑';
       color = Colors.orangeAccent;
-    } else if (w > 0.70) {
-      hint = 'Move back ↓';
+    } else if (w > 0.72) {
+      hint = 'Move back  ↓';
       color = Colors.orangeAccent;
-    } else if (cx < 0.36) {
-      hint = 'Move right →';
+    } else if (cx < 0.34) {
+      hint = 'Move right  →';
       color = Colors.orangeAccent;
-    } else if (cx > 0.64) {
-      hint = 'Move left ←';
+    } else if (cx > 0.66) {
+      hint = 'Move left  ←';
       color = Colors.orangeAccent;
-    } else if (cy < 0.34) {
-      hint = 'Move down ↓';
+    } else if (cy < 0.32) {
+      hint = 'Tilt down  ↓';
       color = Colors.orangeAccent;
-    } else if (cy > 0.66) {
-      hint = 'Move up ↑';
+    } else if (cy > 0.68) {
+      hint = 'Tilt up  ↑';
       color = Colors.orangeAccent;
     }
 
-    final positionGood = hint.isEmpty;
-    if (!positionGood) {
-      _goodFramesInRow = 0;
+    final good = hint.isEmpty;
+    if (!good) {
+      _goodFrames = 0;
       _cancelCountdown();
-      setState(() { _guidanceText = hint; _guideColor = color; });
+      if (mounted) setState(() { _guidanceText = hint; _guideColor = color; });
       return;
     }
 
-    // Position is good — count consecutive good frames.
-    _goodFramesInRow++;
-    setState(() {
-      _guideColor = Colors.greenAccent;
-      _guidanceText = _acceptedCount < _requiredAngles.length
-          ? 'Hold still — capturing ${_requiredAngles[_acceptedCount]}…'
-          : 'Hold still…';
-    });
+    // Position is good.
+    _goodFrames++;
+    final nextAngle = _angles[_nextAngleIndex];
+    if (mounted) {
+      setState(() {
+        _guideColor = Colors.greenAccent;
+        _guidanceText = _countdown > 0
+            ? 'Hold still — ${_countdown}s'
+            : 'Hold still for: $nextAngle';
+      });
+    }
 
-    // After 2 good frames (~700ms) start countdown if not already counting.
-    if (_goodFramesInRow >= 2 && _countdownTimer == null && !_isSubmitting) {
-      _startCountdown(jpeg);
+    // After 2 consecutive good frames (~700 ms) start countdown.
+    if (_goodFrames >= 2 && _countdownTimer == null && !_capturingNow) {
+      _beginCountdown();
     }
   }
 
-  void _startCountdown(Uint8List? firstJpeg) {
-    setState(() => _countdown = 2);
+  void _beginCountdown() {
+    // Lock immediately — prevents any re-entry until capture is fully done.
+    _capturingNow = true;
+    _goodFrames = 0;
     int count = 2;
-    _countdownTimer = Timer.periodic(const Duration(milliseconds: 600), (t) {
+    if (mounted) setState(() => _countdown = count);
+
+    _countdownTimer = Timer.periodic(const Duration(milliseconds: 700), (t) {
+      if (!mounted) {
+        t.cancel();
+        _countdownTimer = null;
+        _capturingNow = false;
+        return;
+      }
       count--;
-      if (!mounted) { t.cancel(); return; }
       setState(() => _countdown = count);
       if (count <= 0) {
         t.cancel();
         _countdownTimer = null;
-        _captureCurrentFrame(firstJpeg);
+        // _capturingNow stays true until _captureFrame finishes.
+        _captureFrame();
       }
     });
   }
@@ -278,138 +305,186 @@ class _StudentEnrollmentScreenState extends ConsumerState<StudentEnrollmentScree
   void _cancelCountdown() {
     _countdownTimer?.cancel();
     _countdownTimer = null;
+    _capturingNow = false;
     if (mounted) setState(() => _countdown = 0);
   }
 
-  Future<void> _captureCurrentFrame(Uint8List? precomputedJpeg) async {
-    if (_samples.length >= _requiredAngles.length || _isSubmitting) return;
-    final frame = _latestFrame;
-    if (frame == null) return;
+  // ---------------------------------------------------------------------------
+  // Capture
+  // ---------------------------------------------------------------------------
 
-    // Convert frame to JPEG in background (no camera shutter, no flash).
-    final jpeg = precomputedJpeg ?? await compute(_frameToJpeg, _frameData(frame));
-    if (jpeg == null || jpeg.isEmpty) return;
-
-    // Extract embedding (or use empty for non-native platforms).
-    List<double> embedding = const [];
-    if (_nativeAvailable) {
-      try {
-        embedding = await FaceAttendancePlatformService().extractEmbeddingFromImage(jpeg);
-      } catch (_) {}
-    } else {
-      embedding = List<double>.generate(128, (_) => _random.nextDouble() * 2 - 1);
-    }
-
-    // Thumbnail: 80×80 from the JPEG.
-    Uint8List? thumb;
-    try {
-      thumb = await compute(_makeThumb, jpeg);
-    } catch (_) {}
-
-    final accepted = embedding.isNotEmpty || !_nativeAvailable;
-    final quality = accepted ? (0.80 + _random.nextDouble() * 0.18).clamp(0.0, 1.0) : 0.3;
-    final angleName = _acceptedCount < _requiredAngles.length
-        ? _requiredAngles[_acceptedCount]
-        : 'Sample ${_samples.length + 1}';
-
-    // Brief capture flash feedback.
-    unawaited(_captureFlashCtrl.forward().then((_) => _captureFlashCtrl.reverse()));
-
-    if (!mounted) return;
-    setState(() {
-      _samples.add(_EnrollmentSample(
-        qualityScore: quality,
-        accepted: accepted,
-        hint: accepted ? 'Captured: $angleName' : 'No face — retrying',
-        embedding: embedding,
-        jpegBytes: jpeg,
-        thumbnail: thumb,
-      ));
-      _guidanceText = accepted
-          ? '${_acceptedCount}/${_requiredAngles.length} captured'
-          : 'Face not detected — adjust position';
-      _goodFramesInRow = 0;
-    });
-
-    // Auto-submit when all angles captured.
-    if (_acceptedCount >= _requiredAngles.length) {
-      await Future<void>.delayed(const Duration(milliseconds: 600));
-      if (mounted) unawaited(_submit(ref.read(studentRepositoryProvider), silent: true));
-    }
-  }
-
-  void _retakeRejected() {
-    setState(() {
-      _samples.removeWhere((s) => !s.accepted);
-      _guidanceText = 'Position your face to continue';
-      _goodFramesInRow = 0;
-    });
-    _cancelCountdown();
-  }
-
-  Future<void> _submit(StudentRepository repo, {bool silent = false}) async {
-    final id = _createdStudent?.id;
-    if (id == null || _acceptedCount < 3) {
-      if (!silent) _snack('Need at least 3 accepted captures');
+  /// [manual] = true when the user tapped "Capture now" explicitly.
+  /// Manual captures are ALWAYS accepted regardless of face detection quality.
+  Future<void> _captureFrame({bool manual = false}) async {
+    if (_isSubmitting || _acceptedCount >= _maxSamples) {
+      _capturingNow = false;
       return;
     }
-    _guidanceTimer?.cancel();
+
+    try {
+      final frame = _latestFrame;
+      Uint8List? jpeg;
+
+      if (frame != null) {
+        jpeg = await compute(_frameToJpeg, _toFrameData(frame));
+      }
+
+      if (jpeg == null || jpeg.isEmpty) {
+        // No frame available yet — silently abort (do not add a bad sample).
+        _capturingNow = false;
+        return;
+      }
+
+      // Extract embedding via native plugin (or mock on non-iOS).
+      List<double> embedding = const [];
+      if (_nativeAvail) {
+        try {
+          embedding = await FaceAttendancePlatformService().extractEmbeddingFromImage(jpeg);
+        } catch (_) {}
+      } else {
+        embedding = List<double>.generate(128, (_) => _rng.nextDouble() * 2 - 1);
+      }
+
+      // Manual captures always accepted; auto-capture requires a detected embedding.
+      final accepted = manual || embedding.isNotEmpty || !_nativeAvail;
+
+      Uint8List? thumb;
+      try { thumb = await compute(_makeThumb, jpeg); } catch (_) {}
+
+      final angleLabel = _nextAngleIndex < _angles.length
+          ? _angles[_nextAngleIndex]
+          : 'Sample ${_samples.length + 1}';
+
+      // Brief green/white flash feedback (cosmetic only — not a camera shutter).
+      unawaited(_flashCtrl.forward().then((_) => _flashCtrl.reverse()));
+
+      if (!mounted) return;
+      setState(() {
+        _samples.add(_Sample(
+          accepted: accepted,
+          hint: accepted ? 'Captured: $angleLabel' : 'No face — retrying',
+          embedding: embedding,
+          qualityScore: accepted ? (0.80 + _rng.nextDouble() * 0.18) : 0.3,
+          jpegBytes: jpeg,
+          thumbnail: thumb,
+        ));
+        _countdown = 0;
+        _goodFrames = 0;
+        _guideColor = accepted ? Colors.greenAccent : Colors.orangeAccent;
+        _guidanceText = accepted
+            ? '${_acceptedCount}/$_maxSamples captured — ${_acceptedCount < _maxSamples ? "next: ${_angles[_nextAngleIndex]}" : "all done!"}'
+            : 'No face — adjust position and try again';
+      });
+
+      // When max reached: stop analysis and prompt to save.
+      if (_acceptedCount >= _maxSamples) {
+        _analysisTimer?.cancel();
+        _cancelCountdown();
+        _promptSave();
+      }
+    } finally {
+      _capturingNow = false;
+    }
+  }
+
+  void _promptSave() {
+    final repo = ref.read(studentRepositoryProvider);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        backgroundColor: Colors.green[800],
+        duration: const Duration(seconds: 12),
+        content: Row(
+          children: [
+            const Icon(Icons.check_circle, color: Colors.white),
+            const SizedBox(width: 10),
+            const Expanded(
+              child: Text(
+                'All 5 captures done!  Tap Save to enroll.',
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+              ),
+            ),
+          ],
+        ),
+        action: SnackBarAction(
+          label: 'Save now',
+          textColor: Colors.greenAccent[200],
+          onPressed: () => _submit(repo),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _submit(StudentRepository repo) async {
+    if (!_canSave) return;
+    _analysisTimer?.cancel();
     _cancelCountdown();
 
     final accepted = _samples.where((s) => s.accepted).toList();
     final embeddings = accepted.map((s) => s.embedding.isNotEmpty ? s.embedding : _mockEmb()).toList();
     final qualities = accepted.map((s) => s.qualityScore).toList();
-    final jpegImages = accepted.map((s) => s.jpegBytes).whereType<Uint8List>().toList();
+    final jpegs = accepted.map((s) => s.jpegBytes).whereType<Uint8List>().toList();
 
     setState(() => _isSubmitting = true);
     try {
       await repo.enrollStudent(
-        studentId: id,
+        studentId: _student!.id,
         embeddings: embeddings,
         qualityScores: qualities,
-        sourceType: _nativeAvailable ? 'ios_vision_feature_print' : 'mock_enrollment',
-        jpegImages: jpegImages.isNotEmpty ? jpegImages : null,
-        studentName: _createdStudent?.fullName,
-        className: _createdStudent?.className,
+        sourceType: _nativeAvail ? 'ios_vision_feature_print' : 'mock_enrollment',
+        jpegImages: jpegs.isNotEmpty ? jpegs : null,
+        studentName: _student?.fullName,
+        className: _student?.className,
       );
       ref.invalidate(studentListProvider);
       try {
-        final all = await repo.fetchStudents();
-        ref.read(simulatedStudentPoolProvider.notifier).state = all;
+        ref.read(simulatedStudentPoolProvider.notifier).state =
+            await repo.fetchStudents();
       } catch (_) {}
-      if (mounted) {
-        setState(() { _isSubmitting = false; _phase = _EnrollmentPhase.done; });
-      }
+      if (mounted) setState(() { _isSubmitting = false; _phase = _Phase.done; });
     } catch (e) {
       if (mounted) {
         setState(() => _isSubmitting = false);
-        _snack('Enrollment failed: $e');
+        _snack('Enrollment failed: $e', Colors.redAccent);
       }
     }
   }
 
-  void _startOver() {
-    _guidanceTimer?.cancel();
+  void _retakeRejected() {
     _cancelCountdown();
-    unawaited(_cameraController?.stopImageStream().catchError((_) {}));
-    _cameraController?.dispose();
     setState(() {
-      _phase = _EnrollmentPhase.enterDetails;
-      _createdStudent = null;
+      _samples.removeWhere((s) => !s.accepted);
+      _goodFrames = 0;
+      _guidanceText = 'Position your face to continue';
+    });
+    // Restart analysis if it was stopped.
+    if (_analysisTimer == null || !(_analysisTimer?.isActive ?? false)) {
+      _analysisTimer = Timer.periodic(
+        const Duration(milliseconds: 350), (_) => _analyzeFrame());
+    }
+  }
+
+  void _startOver() {
+    _analysisTimer?.cancel();
+    _cancelCountdown();
+    _stopCamera();
+    setState(() {
+      _phase = _Phase.enterDetails;
+      _student = null;
       _samples.clear();
-      _cameraController = null;
       _faceBox = null;
-      _guidanceText = 'Position your face in the circle';
+      _goodFrames = 0;
+      _guidanceText = 'Position your face in the oval';
       _guideColor = Colors.white54;
     });
   }
 
   List<double> _mockEmb() =>
-      List<double>.generate(128, (_) => _random.nextDouble() * 2 - 1);
+      List<double>.generate(128, (_) => _rng.nextDouble() * 2 - 1);
 
-  void _snack(String msg) {
+  void _snack(String msg, Color bg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), backgroundColor: bg));
   }
 
   // ---------------------------------------------------------------------------
@@ -424,34 +499,31 @@ class _StudentEnrollmentScreenState extends ConsumerState<StudentEnrollmentScree
       appBar: AppBar(
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
-        title: Text(
-          _phase == _EnrollmentPhase.enterDetails
-              ? 'New Student'
-              : _phase == _EnrollmentPhase.captureFace
-                  ? 'Face Scan — ${_createdStudent?.fullName ?? ""}'
-                  : 'Enrollment Complete',
-        ),
+        elevation: 0,
+        title: Text(_phase == _Phase.enterDetails
+            ? 'New Student'
+            : _phase == _Phase.captureFace
+                ? _student?.fullName ?? 'Face Scan'
+                : 'Enrolled'),
         actions: [
-          if (_phase == _EnrollmentPhase.captureFace)
+          if (_phase == _Phase.captureFace)
             TextButton(
               onPressed: _startOver,
-              child: const Text('Start over', style: TextStyle(color: Colors.white70)),
+              child: const Text('Cancel', style: TextStyle(color: Colors.white60)),
             ),
         ],
       ),
       body: switch (_phase) {
-        _EnrollmentPhase.enterDetails => _buildDetailsStep(repo),
-        _EnrollmentPhase.captureFace => _buildCaptureStep(repo),
-        _EnrollmentPhase.done => _buildDoneStep(),
+        _Phase.enterDetails => _buildDetails(repo),
+        _Phase.captureFace => _buildCapture(repo),
+        _Phase.done => _buildDone(),
       },
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // Details step
-  // ---------------------------------------------------------------------------
+  // ---- Details ----
 
-  Widget _buildDetailsStep(StudentRepository repo) {
+  Widget _buildDetails(StudentRepository repo) {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24),
       child: Column(
@@ -460,16 +532,16 @@ class _StudentEnrollmentScreenState extends ConsumerState<StudentEnrollmentScree
           const Text('Student information',
               style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white)),
           const SizedBox(height: 24),
-          _field(_nameController, 'Full name', Icons.person),
+          _tf(_nameCtrl, 'Full name', Icons.person),
           const SizedBox(height: 14),
-          _field(_rollController, 'Roll number', Icons.numbers),
+          _tf(_rollCtrl, 'Roll number', Icons.tag),
           const SizedBox(height: 14),
           Row(children: [
-            Expanded(child: _field(_classController, 'Class', Icons.class_)),
+            Expanded(child: _tf(_classCtrl, 'Class', Icons.school)),
             const SizedBox(width: 12),
-            Expanded(child: _field(_sectionController, 'Section', Icons.grid_view)),
+            Expanded(child: _tf(_secCtrl, 'Section', Icons.grid_view_rounded)),
           ]),
-          const SizedBox(height: 32),
+          const SizedBox(height: 36),
           SizedBox(
             width: double.infinity,
             height: 52,
@@ -480,7 +552,9 @@ class _StudentEnrollmentScreenState extends ConsumerState<StudentEnrollmentScree
               ),
               onPressed: _creatingStudent ? null : () => _goToCapture(repo),
               icon: _creatingStudent
-                  ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                  ? const SizedBox(
+                      width: 18, height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                   : const Icon(Icons.arrow_forward_rounded),
               label: Text(_creatingStudent ? 'Creating…' : 'Continue to face scan',
                   style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
@@ -491,37 +565,30 @@ class _StudentEnrollmentScreenState extends ConsumerState<StudentEnrollmentScree
     );
   }
 
-  Widget _field(TextEditingController ctrl, String label, IconData icon) {
-    return TextField(
-      controller: ctrl,
-      style: const TextStyle(color: Colors.white),
-      decoration: InputDecoration(
-        labelText: label,
-        labelStyle: const TextStyle(color: Colors.white54),
-        prefixIcon: Icon(icon, color: Colors.white38),
-        filled: true,
-        fillColor: Colors.white10,
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide.none,
+  Widget _tf(TextEditingController c, String label, IconData icon) => TextField(
+        controller: c,
+        style: const TextStyle(color: Colors.white),
+        decoration: InputDecoration(
+          labelText: label,
+          labelStyle: const TextStyle(color: Colors.white54),
+          prefixIcon: Icon(icon, color: Colors.white38),
+          filled: true,
+          fillColor: Colors.white10,
+          border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+          focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: Colors.blueAccent)),
         ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: Colors.blueAccent),
-        ),
-      ),
-    );
-  }
+      );
 
-  // ---------------------------------------------------------------------------
-  // Capture step
-  // ---------------------------------------------------------------------------
+  // ---- Capture ----
 
-  Widget _buildCaptureStep(StudentRepository repo) {
+  Widget _buildCapture(StudentRepository repo) {
     return Column(
       children: [
         Expanded(child: _buildCameraArea()),
-        _buildCapturePanel(repo),
+        _buildBottomPanel(repo),
       ],
     );
   }
@@ -530,118 +597,139 @@ class _StudentEnrollmentScreenState extends ConsumerState<StudentEnrollmentScree
     return Stack(
       fit: StackFit.expand,
       children: [
-        // Camera preview or black background.
-        if (_cameraController != null && _cameraController!.value.isInitialized)
-          CameraPreview(_cameraController!)
+        // ---- Camera preview (no stretch) ----
+        if (_cam != null && _cam!.value.isInitialized)
+          _CameraFill(ctrl: _cam!)
         else
-          const ColoredBox(color: Colors.black,
-              child: Center(child: CircularProgressIndicator(color: Colors.white38))),
+          const ColoredBox(
+            color: Colors.black,
+            child: Center(child: CircularProgressIndicator(color: Colors.white38)),
+          ),
 
-        // Capture flash feedback overlay.
+        // ---- Capture flash overlay ----
         FadeTransition(
-          opacity: _captureFlashAnim,
-          child: Container(color: Colors.white.withAlpha(80)),
+          opacity: _flashAnim,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: RadialGradient(
+                colors: [Colors.greenAccent.withAlpha(120), Colors.transparent],
+                radius: 0.8,
+              ),
+            ),
+          ),
         ),
 
-        // Face guide overlay.
+        // ---- Face guide + guidance text ----
         _FaceGuideOverlay(
           faceBox: _faceBox,
           guideColor: _guideColor,
           guidanceText: _guidanceText,
           countdown: _countdown,
           acceptedCount: _acceptedCount,
-          totalRequired: _requiredAngles.length,
+          total: _maxSamples,
+          angles: _angles,
         ),
       ],
     );
   }
 
-  Widget _buildCapturePanel(StudentRepository repo) {
+  Widget _buildBottomPanel(StudentRepository repo) {
     return Container(
-      color: Colors.grey[900],
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+      color: const Color(0xFF1A1A1A),
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 22),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Sample thumbnails row.
+          // Thumbnail strip
           if (_samples.isNotEmpty) ...[
             SizedBox(
-              height: 64,
+              height: 68,
               child: ListView.separated(
                 scrollDirection: Axis.horizontal,
                 itemCount: _samples.length,
                 separatorBuilder: (_, __) => const SizedBox(width: 8),
-                itemBuilder: (context, i) {
-                  final s = _samples[i];
-                  return _SampleThumb(
-                    thumb: s.thumbnail,
-                    accepted: s.accepted,
-                    label: i < _requiredAngles.length ? _requiredAngles[i] : '${i + 1}',
-                  );
-                },
+                itemBuilder: (_, i) => _ThumbTile(
+                  sample: _samples[i],
+                  label: i < _angles.length ? _angles[i] : '${i + 1}',
+                ),
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
           ],
-          // Progress indicator.
-          LinearProgressIndicator(
-            value: _acceptedCount / _requiredAngles.length,
-            backgroundColor: Colors.white12,
-            valueColor: AlwaysStoppedAnimation<Color>(
-              _acceptedCount >= _requiredAngles.length ? Colors.greenAccent : Colors.blueAccent,
+
+          // Progress bar
+          ClipRRect(
+            borderRadius: BorderRadius.circular(3),
+            child: LinearProgressIndicator(
+              value: _acceptedCount / _maxSamples,
+              backgroundColor: Colors.white10,
+              valueColor: AlwaysStoppedAnimation<Color>(
+                _acceptedCount >= _maxSamples ? Colors.greenAccent : Colors.blueAccent),
+              minHeight: 4,
             ),
-            minHeight: 4,
-            borderRadius: BorderRadius.circular(2),
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
+
           Row(
             children: [
               Expanded(
                 child: Text(
-                  '$_acceptedCount / ${_requiredAngles.length} angles captured',
-                  style: const TextStyle(color: Colors.white70, fontSize: 13),
+                  '$_acceptedCount / $_maxSamples angles',
+                  style: const TextStyle(color: Colors.white60, fontSize: 13),
                 ),
               ),
               if (_samples.any((s) => !s.accepted))
-                TextButton.icon(
-                  onPressed: _retakeRejected,
-                  icon: const Icon(Icons.refresh, size: 16, color: Colors.orangeAccent),
-                  label: const Text('Retake bad', style: TextStyle(color: Colors.orangeAccent, fontSize: 13)),
+                GestureDetector(
+                  onTap: _retakeRejected,
+                  child: const Text(
+                    'Retake failed',
+                    style: TextStyle(color: Colors.orangeAccent, fontSize: 13,
+                        decoration: TextDecoration.underline),
+                  ),
                 ),
             ],
           ),
-          const SizedBox(height: 8),
-          // Action buttons.
+          const SizedBox(height: 10),
+
           Row(
             children: [
+              // Manual capture button — always records a sample
               Expanded(
                 child: OutlinedButton.icon(
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Colors.white70,
-                    side: const BorderSide(color: Colors.white30),
+                    side: const BorderSide(color: Colors.white24),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    padding: const EdgeInsets.symmetric(vertical: 13),
                   ),
-                  onPressed: _captureCount >= _requiredAngles.length
+                  onPressed: (_capturingNow || _isSubmitting || _acceptedCount >= _maxSamples)
                       ? null
-                      : () => _captureCurrentFrame(null),
+                      : () {
+                          _capturingNow = true;
+                          _cancelCountdown();
+                          _captureFrame(manual: true);
+                        },
                   icon: const Icon(Icons.camera_alt_outlined, size: 18),
                   label: const Text('Capture now'),
                 ),
               ),
               const SizedBox(width: 12),
+
+              // Save button
               Expanded(
                 child: ElevatedButton.icon(
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: _canSubmit ? Colors.greenAccent[700] : Colors.white12,
+                    backgroundColor: _canSave ? const Color(0xFF2E7D32) : Colors.white10,
                     foregroundColor: Colors.white,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    padding: const EdgeInsets.symmetric(vertical: 13),
                   ),
-                  onPressed: _canSubmit ? () => _submit(repo) : null,
+                  onPressed: _canSave ? () => _submit(repo) : null,
                   icon: _isSubmitting
-                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                      : const Icon(Icons.check_circle_outline, size: 18),
+                      ? const SizedBox(
+                          width: 16, height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                      : const Icon(Icons.save_rounded, size: 18),
                   label: Text(_isSubmitting ? 'Saving…' : 'Save enrollment'),
                 ),
               ),
@@ -652,41 +740,35 @@ class _StudentEnrollmentScreenState extends ConsumerState<StudentEnrollmentScree
     );
   }
 
-  int get _captureCount => _samples.length;
+  // ---- Done ----
 
-  // ---------------------------------------------------------------------------
-  // Done step
-  // ---------------------------------------------------------------------------
-
-  Widget _buildDoneStep() {
+  Widget _buildDone() {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.check_circle_rounded, size: 80, color: Colors.greenAccent),
+            const Icon(Icons.verified_rounded, size: 84, color: Colors.greenAccent),
             const SizedBox(height: 20),
             Text(
-              '${_createdStudent?.fullName ?? "Student"} enrolled',
+              '${_student?.fullName ?? "Student"} enrolled',
               style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),
-            Text(
-              '$_acceptedCount face samples saved',
-              style: const TextStyle(color: Colors.white54, fontSize: 15),
-            ),
-            const SizedBox(height: 32),
-            ElevatedButton.icon(
-              style: ElevatedButton.styleFrom(
+            Text('$_acceptedCount face samples saved',
+                style: const TextStyle(color: Colors.white54, fontSize: 15)),
+            const SizedBox(height: 36),
+            FilledButton.icon(
+              style: FilledButton.styleFrom(
                 backgroundColor: Colors.blueAccent,
                 padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 14),
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
               ),
               onPressed: _startOver,
-              icon: const Icon(Icons.person_add),
-              label: const Text('Enroll another student', style: TextStyle(fontSize: 15)),
+              icon: const Icon(Icons.person_add_rounded),
+              label: const Text('Enroll another', style: TextStyle(fontSize: 15)),
             ),
           ],
         ),
@@ -696,7 +778,40 @@ class _StudentEnrollmentScreenState extends ConsumerState<StudentEnrollmentScree
 }
 
 // ---------------------------------------------------------------------------
-// Face guide overlay widget
+// Camera preview — fills container without stretching
+// ---------------------------------------------------------------------------
+
+class _CameraFill extends StatelessWidget {
+  const _CameraFill({required this.ctrl});
+  final CameraController ctrl;
+
+  @override
+  Widget build(BuildContext context) {
+    // previewSize on iOS is always in landscape orientation even in portrait UI.
+    // Swap w/h to get the portrait aspect ratio, then use FittedBox cover.
+    final ps = ctrl.value.previewSize;
+    if (ps == null) return const ColoredBox(color: Colors.black);
+
+    // Portrait aspect ratio = landscape_height / landscape_width
+    final portraitW = ps.height;
+    final portraitH = ps.width;
+
+    return ClipRect(
+      child: FittedBox(
+        fit: BoxFit.cover,
+        alignment: Alignment.center,
+        child: SizedBox(
+          width: portraitW,
+          height: portraitH,
+          child: CameraPreview(ctrl),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Face guide overlay
 // ---------------------------------------------------------------------------
 
 class _FaceGuideOverlay extends StatelessWidget {
@@ -706,7 +821,8 @@ class _FaceGuideOverlay extends StatelessWidget {
     required this.guidanceText,
     required this.countdown,
     required this.acceptedCount,
-    required this.totalRequired,
+    required this.total,
+    required this.angles,
   });
 
   final Map<String, dynamic>? faceBox;
@@ -714,70 +830,88 @@ class _FaceGuideOverlay extends StatelessWidget {
   final String guidanceText;
   final int countdown;
   final int acceptedCount;
-  final int totalRequired;
+  final int total;
+  final List<String> angles;
 
   @override
   Widget build(BuildContext context) {
     return CustomPaint(
-      painter: _FaceGuidePainter(faceBox: faceBox, guideColor: guideColor),
+      painter: _GuidePainter(faceBox: faceBox, guideColor: guideColor),
       child: Stack(
         children: [
-          // Guidance text at the top.
+          // Top guidance chip
           Positioned(
-            top: 20,
+            top: 18,
             left: 0,
             right: 0,
             child: Center(
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 9),
                 decoration: BoxDecoration(
-                  color: Colors.black.withAlpha(160),
-                  borderRadius: BorderRadius.circular(20),
+                  color: Colors.black.withAlpha(170),
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(color: guideColor.withAlpha(100), width: 1),
                 ),
                 child: Text(
                   guidanceText,
                   style: TextStyle(
                     color: guideColor,
-                    fontSize: 16,
+                    fontSize: 15,
                     fontWeight: FontWeight.w600,
-                    letterSpacing: 0.3,
+                    letterSpacing: 0.2,
                   ),
                 ),
               ),
             ),
           ),
-          // Countdown
+
+          // Big countdown number in centre
           if (countdown > 0)
             Center(
               child: Text(
                 '$countdown',
                 style: const TextStyle(
                   color: Colors.white,
-                  fontSize: 72,
+                  fontSize: 80,
                   fontWeight: FontWeight.bold,
-                  shadows: [Shadow(color: Colors.black54, blurRadius: 12)],
+                  shadows: [Shadow(color: Colors.black87, blurRadius: 16)],
                 ),
               ),
             ),
-          // Progress dots at the bottom.
+
+          // Bottom: angle labels + dots
           Positioned(
-            bottom: 16,
-            left: 0,
-            right: 0,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: List.generate(totalRequired, (i) {
-                return Container(
-                  margin: const EdgeInsets.symmetric(horizontal: 4),
-                  width: 10,
-                  height: 10,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: i < acceptedCount ? Colors.greenAccent : Colors.white24,
-                    border: Border.all(color: Colors.white38, width: 1),
+            bottom: 14,
+            left: 16,
+            right: 16,
+            child: Column(
+              children: [
+                // Next angle hint
+                if (acceptedCount < total)
+                  Text(
+                    'Next: ${angles[acceptedCount.clamp(0, angles.length - 1)]}',
+                    style: TextStyle(
+                      color: guideColor.withAlpha(200),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                    ),
                   ),
-                );
-              }),
+                const SizedBox(height: 6),
+                // Progress dots
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: List.generate(total, (i) => Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 4),
+                    width: 9,
+                    height: 9,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: i < acceptedCount ? Colors.greenAccent : Colors.white24,
+                      border: Border.all(color: Colors.white38),
+                    ),
+                  )),
+                ),
+              ],
             ),
           ),
         ],
@@ -786,83 +920,83 @@ class _FaceGuideOverlay extends StatelessWidget {
   }
 }
 
-class _FaceGuidePainter extends CustomPainter {
-  const _FaceGuidePainter({this.faceBox, required this.guideColor});
+class _GuidePainter extends CustomPainter {
+  const _GuidePainter({this.faceBox, required this.guideColor});
   final Map<String, dynamic>? faceBox;
   final Color guideColor;
 
   @override
   void paint(Canvas canvas, Size size) {
     final cx = size.width * 0.5;
-    final cy = size.height * 0.42;
-    final rw = size.width * 0.32;
+    final cy = size.height * 0.44;
+    final rw = size.width * 0.33;
     final rh = size.height * 0.30;
+    final ovalRect =
+        Rect.fromCenter(center: Offset(cx, cy), width: rw * 2, height: rh * 2);
 
-    // Dark vignette outside the oval.
-    final vigPaint = Paint()..color = Colors.black.withAlpha(100);
-    final fullRect = Rect.fromLTWH(0, 0, size.width, size.height);
-    final ovalRect = Rect.fromCenter(center: Offset(cx, cy), width: rw * 2.1, height: rh * 2.1);
+    // Dark vignette outside oval
     final path = Path()
-      ..addRect(fullRect)
+      ..addRect(Rect.fromLTWH(0, 0, size.width, size.height))
       ..addOval(ovalRect)
       ..fillType = PathFillType.evenOdd;
-    canvas.drawPath(path, vigPaint);
+    canvas.drawPath(path, Paint()..color = Colors.black.withAlpha(110));
 
-    // Oval border.
-    final borderPaint = Paint()
-      ..color = guideColor.withAlpha(200)
-      ..strokeWidth = 2.5
-      ..style = PaintingStyle.stroke;
-    canvas.drawOval(ovalRect, borderPaint);
+    // Oval border
+    canvas.drawOval(
+      ovalRect,
+      Paint()
+        ..color = guideColor.withAlpha(210)
+        ..strokeWidth = 2.5
+        ..style = PaintingStyle.stroke,
+    );
 
-    // Corner tick marks.
-    final tickPaint = Paint()
+    // Corner tick marks
+    final tick = Paint()
       ..color = guideColor
       ..strokeWidth = 3.5
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round;
-    const tickLen = 18.0;
-    final corners = [
-      Offset(cx - rw, cy - rh), // top-left
-      Offset(cx + rw, cy - rh), // top-right
-      Offset(cx - rw, cy + rh), // bottom-left
-      Offset(cx + rw, cy + rh), // bottom-right
-    ];
-    for (final c in corners) {
-      final dx = c.dx > cx ? tickLen : -tickLen;
-      final dy = c.dy > cy ? tickLen : -tickLen;
-      canvas.drawLine(c, Offset(c.dx + dx * 0.6, c.dy), tickPaint);
-      canvas.drawLine(c, Offset(c.dx, c.dy + dy * 0.6), tickPaint);
+    const tl = 20.0;
+    for (final corner in [
+      Offset(cx - rw, cy - rh),
+      Offset(cx + rw, cy - rh),
+      Offset(cx - rw, cy + rh),
+      Offset(cx + rw, cy + rh),
+    ]) {
+      final dx = (corner.dx > cx ? 1 : -1) * tl * 0.6;
+      final dy = (corner.dy > cy ? 1 : -1) * tl * 0.6;
+      canvas.drawLine(corner, Offset(corner.dx + dx, corner.dy), tick);
+      canvas.drawLine(corner, Offset(corner.dx, corner.dy + dy), tick);
     }
 
-    // Draw detected face box if present.
+    // Detected face box (thin indicator)
     if (faceBox != null && faceBox!['detected'] == true) {
       final fx = (faceBox!['x'] as num).toDouble() * size.width;
       final fy = (faceBox!['y'] as num).toDouble() * size.height;
       final fw = (faceBox!['w'] as num).toDouble() * size.width;
       final fh = (faceBox!['h'] as num).toDouble() * size.height;
-      final faceRect = Rect.fromLTWH(fx, fy, fw, fh);
-      final facePaint = Paint()
-        ..color = guideColor.withAlpha(80)
-        ..strokeWidth = 1.5
-        ..style = PaintingStyle.stroke;
-      canvas.drawRect(faceRect, facePaint);
+      canvas.drawRect(
+        Rect.fromLTWH(fx, fy, fw, fh),
+        Paint()
+          ..color = guideColor.withAlpha(70)
+          ..strokeWidth = 1.5
+          ..style = PaintingStyle.stroke,
+      );
     }
   }
 
   @override
-  bool shouldRepaint(_FaceGuidePainter old) =>
-      old.faceBox != faceBox || old.guideColor != guideColor;
+  bool shouldRepaint(_GuidePainter o) =>
+      o.faceBox != faceBox || o.guideColor != guideColor;
 }
 
 // ---------------------------------------------------------------------------
-// Sample thumbnail widget
+// Thumbnail tile
 // ---------------------------------------------------------------------------
 
-class _SampleThumb extends StatelessWidget {
-  const _SampleThumb({this.thumb, required this.accepted, required this.label});
-  final Uint8List? thumb;
-  final bool accepted;
+class _ThumbTile extends StatelessWidget {
+  const _ThumbTile({required this.sample, required this.label});
+  final _Sample sample;
   final String label;
 
   @override
@@ -870,91 +1004,109 @@ class _SampleThumb extends StatelessWidget {
     return Column(
       children: [
         Container(
-          width: 46,
-          height: 46,
+          width: 48,
+          height: 48,
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(8),
             border: Border.all(
-              color: accepted ? Colors.greenAccent : Colors.redAccent,
+              color: sample.accepted ? Colors.greenAccent : Colors.redAccent,
               width: 2,
             ),
             color: Colors.white10,
           ),
-          child: thumb != null
+          child: sample.thumbnail != null
               ? ClipRRect(
                   borderRadius: BorderRadius.circular(6),
-                  child: Image.memory(thumb!, fit: BoxFit.cover),
+                  child: Image.memory(sample.thumbnail!, fit: BoxFit.cover),
                 )
               : Icon(
-                  accepted ? Icons.check : Icons.close,
-                  color: accepted ? Colors.greenAccent : Colors.redAccent,
-                  size: 20,
+                  sample.accepted ? Icons.check : Icons.close,
+                  color: sample.accepted ? Colors.greenAccent : Colors.redAccent,
+                  size: 22,
                 ),
         ),
-        const SizedBox(height: 2),
-        Text(label,
+        const SizedBox(height: 3),
+        SizedBox(
+          width: 52,
+          child: Text(
+            label,
             style: const TextStyle(color: Colors.white54, fontSize: 9),
-            overflow: TextOverflow.ellipsis),
+            textAlign: TextAlign.center,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
       ],
     );
   }
 }
 
 // ---------------------------------------------------------------------------
-// Isolate helpers (top-level, serialisable)
+// Isolate helpers (must be top-level)
 // ---------------------------------------------------------------------------
 
 class _PlaneData {
-  _PlaneData({required this.bytes, required this.bytesPerRow, required this.bytesPerPixel});
+  _PlaneData(
+      {required this.bytes,
+      required this.bytesPerRow,
+      required this.bytesPerPixel});
   final Uint8List bytes;
   final int bytesPerRow;
   final int bytesPerPixel;
 }
 
-class _FrameDataEnrollment {
-  _FrameDataEnrollment({required this.width, required this.height, required this.format, required this.planes});
+class _FrameData {
+  _FrameData(
+      {required this.width,
+      required this.height,
+      required this.format,
+      required this.planes});
   final int width;
   final int height;
   final ImageFormatGroup format;
   final List<_PlaneData> planes;
 }
 
-_FrameDataEnrollment _frameData(CameraImage frame) => _FrameDataEnrollment(
-      width: frame.width,
-      height: frame.height,
-      format: frame.format.group,
-      planes: frame.planes.map((p) => _PlaneData(
-        bytes: p.bytes,
-        bytesPerRow: p.bytesPerRow,
-        bytesPerPixel: p.bytesPerPixel ?? 1,
-      )).toList(),
+_FrameData _toFrameData(CameraImage f) => _FrameData(
+      width: f.width,
+      height: f.height,
+      format: f.format.group,
+      planes: f.planes
+          .map((p) => _PlaneData(
+                bytes: p.bytes,
+                bytesPerRow: p.bytesPerRow,
+                bytesPerPixel: p.bytesPerPixel ?? 1,
+              ))
+          .toList(),
     );
 
-Uint8List? _frameToJpeg(_FrameDataEnrollment data) {
+/// Converts a raw CameraImage to JPEG in a compute isolate (no UI thread block).
+Uint8List? _frameToJpeg(_FrameData d) {
   try {
     img.Image image;
-    if (data.format == ImageFormatGroup.bgra8888) {
+    if (d.format == ImageFormatGroup.bgra8888) {
       image = img.Image.fromBytes(
-        width: data.width,
-        height: data.height,
-        bytes: data.planes[0].bytes.buffer,
+        width: d.width,
+        height: d.height,
+        bytes: d.planes[0].bytes.buffer,
         order: img.ChannelOrder.bgra,
         numChannels: 4,
       );
-    } else if (data.format == ImageFormatGroup.yuv420) {
-      final yP = data.planes[0];
-      final uP = data.planes[1];
-      final vP = data.planes[2];
-      image = img.Image(width: data.width, height: data.height, numChannels: 3);
-      for (int y = 0; y < data.height; y++) {
-        for (int x = 0; x < data.width; x++) {
+    } else if (d.format == ImageFormatGroup.yuv420) {
+      final yP = d.planes[0];
+      final uP = d.planes[1];
+      final vP = d.planes[2];
+      image = img.Image(width: d.width, height: d.height, numChannels: 3);
+      for (int y = 0; y < d.height; y++) {
+        for (int x = 0; x < d.width; x++) {
           final yv = yP.bytes[y * yP.bytesPerRow + x];
           final uvX = x >> 1, uvY = y >> 1;
           final uvIdx = uvY * uP.bytesPerRow + uvX * uP.bytesPerPixel;
           final u = uP.bytes[uvIdx] - 128;
           final v = vP.bytes[uvIdx] - 128;
           image.setPixelRgb(
-            x, y,
+            x,
+            y,
             (yv + 1.402 * v).clamp(0, 255).toInt(),
             (yv - 0.344136 * u - 0.714136 * v).clamp(0, 255).toInt(),
             (yv + 1.772 * u).clamp(0, 255).toInt(),
@@ -964,7 +1116,6 @@ Uint8List? _frameToJpeg(_FrameDataEnrollment data) {
     } else {
       return null;
     }
-    // Full resolution for enrollment quality; downsample for guidance only.
     return Uint8List.fromList(img.encodeJpg(image, quality: 88));
   } catch (_) {
     return null;
@@ -974,6 +1125,6 @@ Uint8List? _frameToJpeg(_FrameDataEnrollment data) {
 Uint8List _makeThumb(Uint8List jpeg) {
   final decoded = img.decodeJpg(jpeg);
   if (decoded == null) return jpeg;
-  final thumb = img.copyResizeCropSquare(decoded, size: 80);
-  return Uint8List.fromList(img.encodeJpg(thumb, quality: 70));
+  return Uint8List.fromList(
+      img.encodeJpg(img.copyResizeCropSquare(decoded, size: 80), quality: 70));
 }
