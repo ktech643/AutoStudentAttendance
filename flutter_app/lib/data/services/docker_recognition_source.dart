@@ -30,6 +30,10 @@ class DockerRecognitionSource implements RecognitionSource {
   // Latest raw frame from the image stream (not yet converted).
   CameraImage? _latestFrame;
 
+  /// Notifies the UI when the camera controller is ready for preview.
+  /// Null while the camera is not yet initialised or after stop().
+  final cameraNotifier = ValueNotifier<CameraController?>(null);
+
   @override
   Stream<RecognitionEvent> events() => _controller.stream;
 
@@ -44,6 +48,7 @@ class DockerRecognitionSource implements RecognitionSource {
   Future<void> stop() async {
     _pollTimer?.cancel();
     _pollTimer = null;
+    cameraNotifier.value = null;
     try { await _camera?.stopImageStream(); } catch (_) {}
     await _camera?.dispose();
     _camera = null;
@@ -71,6 +76,8 @@ class DockerRecognitionSource implements RecognitionSource {
     await _camera!.startImageStream((frame) {
       _latestFrame = frame;
     });
+    // Signal to the UI that the preview is ready.
+    cameraNotifier.value = _camera;
   }
 
   Future<void> _processLatestFrame() async {

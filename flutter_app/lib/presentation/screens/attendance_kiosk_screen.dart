@@ -1,9 +1,11 @@
+import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:ios_face_attendance_plugin/ios_native_plugin.dart';
 
+import '../../data/services/docker_recognition_source.dart';
 import '../providers/providers.dart';
 import '../providers/kiosk_state.dart';
 import '../widgets/face_camera_view.dart';
@@ -93,7 +95,7 @@ class _AttendanceKioskScreenState extends ConsumerState<AttendanceKioskScreen> {
   }
 }
 
-class _KioskPreviewStack extends ConsumerWidget {
+class _KioskPreviewStack extends ConsumerStatefulWidget {
   const _KioskPreviewStack({
     required this.kioskState,
     required this.cameraMountId,
@@ -105,54 +107,133 @@ class _KioskPreviewStack extends ConsumerWidget {
   final ValueChanged<bool> onCameraReady;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_KioskPreviewStack> createState() => _KioskPreviewStackState();
+}
+
+class _KioskPreviewStackState extends ConsumerState<_KioskPreviewStack> {
+  @override
+  Widget build(BuildContext context) {
     final config = ref.watch(appConfigProvider);
     final isDocker = ref.watch(isDockerBackendProvider).valueOrNull ?? false;
-
-    // Docker mode: DockerRecognitionSource owns the camera — show FaceCameraView
-    //   (it starts its own session; the source's internal camera is separate).
-    //   We show a plain black background with overlay; the Docker source captures
-    //   frames independently.  On iOS with our native plugin, use NativeCameraPreview.
-    final useNativePreview = !config.simulatedRecognition &&
-        !isDocker &&
-        defaultTargetPlatform == TargetPlatform.iOS;
+    final source = ref.watch(recognitionSourceProvider);
 
     return Stack(
       fit: StackFit.expand,
       children: [
-        if (useNativePreview)
-          const NativeCameraPreview()
-        else if (isDocker)
-          // Docker: show a camera preview using FaceCameraView while the source
-          // captures frames independently in the background.
-          FaceCameraView(
-            key: ValueKey<int>(cameraMountId),
-            onReady: (c) {
-              onCameraReady(c != null && c.value.isInitialized);
-            },
+        // ── Camera preview ─────────────────────────────────────────────────
+        if (isDocker && source is DockerRecognitionSource)
+          // Docker: preview comes from the source's own camera session.
+          // Using FaceCameraView here would open a second session → blank preview.
+          _DockerCameraPreview(
+            source: source,
+            onReady: widget.onCameraReady,
           )
+        else if (!config.simulatedRecognition &&
+            defaultTargetPlatform == TargetPlatform.iOS)
+          // Native iOS plugin owns the session — render via PlatformView.
+          const NativeCameraPreview()
         else
+          // Simulated / web — Flutter camera package.
           FaceCameraView(
-            key: ValueKey<int>(cameraMountId),
+            key: ValueKey<int>(widget.cameraMountId),
             onReady: (c) {
-              onCameraReady(c != null && c.value.isInitialized);
+              widget.onCameraReady(c != null && c.value.isInitialized);
             },
           ),
-        RecognitionOverlay(event: kioskState.latestRecognition),
+
+        // ── Overlays ───────────────────────────────────────────────────────
+        RecognitionOverlay(event: widget.kioskState.latestRecognition),
         Positioned(
           top: 12,
           left: 12,
-          right: kioskState.attendanceBannerName != null ? 220 : 12,
-          child: _StatusBar(kioskState: kioskState),
+          right: widget.kioskState.attendanceBannerName != null ? 220 : 12,
+          child: _StatusBar(kioskState: widget.kioskState),
         ),
-        if (kioskState.attendanceBannerName != null)
+        if (widget.kioskState.attendanceBannerName != null)
           Positioned(
             top: 12,
             right: 12,
             width: 200,
-            child: _AttendanceMarkBanner(kioskState: kioskState),
+            child: _AttendanceMarkBanner(kioskState: widget.kioskState),
           ),
       ],
+    );
+  }
+}
+
+/// Shows the camera preview from [DockerRecognitionSource.cameraNotifier].
+/// Listens to the ValueNotifier so it rebuilds once the camera is initialised.
+class _DockerCameraPreview extends StatefulWidget {
+  const _DockerCameraPreview({
+    required this.source,
+    required this.onReady,
+  });
+
+  final DockerRecognitionSource source;
+  final ValueChanged<bool> onReady;
+
+  @override
+  State<_DockerCameraPreview> createState() => _DockerCameraPreviewState();
+}
+
+class _DockerCameraPreviewState extends State<_DockerCameraPreview> {
+  CameraController? _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.source.cameraNotifier.addListener(_onCameraChanged);
+    // Might already be ready if start() was called before we mounted.
+    _ctrl = widget.source.cameraNotifier.value;
+    if (_ctrl != null) widget.onReady(true);
+  }
+
+  void _onCameraChanged() {
+    if (!mounted) return;
+    setState(() => _ctrl = widget.source.cameraNotifier.value);
+    widget.onReady(_ctrl != null);
+  }
+
+  @override
+  void dispose() {
+    widget.source.cameraNotifier.removeListener(_onCameraChanged);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ctrl = _ctrl;
+    if (ctrl == null || !ctrl.value.isInitialized) {
+      return const ColoredBox(
+        color: Colors.black,
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(color: Colors.white38),
+              SizedBox(height: 12),
+              Text('Starting camera…',
+                  style: TextStyle(color: Colors.white38, fontSize: 13)),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // Fill without stretching — swap w/h because iOS previewSize is landscape.
+    final ps = ctrl.value.previewSize;
+    if (ps == null) return const ColoredBox(color: Colors.black);
+
+    return ClipRect(
+      child: FittedBox(
+        fit: BoxFit.cover,
+        alignment: Alignment.center,
+        child: SizedBox(
+          width: ps.height,  // portrait: swap landscape dimensions
+          height: ps.width,
+          child: CameraPreview(ctrl),
+        ),
+      ),
     );
   }
 }
