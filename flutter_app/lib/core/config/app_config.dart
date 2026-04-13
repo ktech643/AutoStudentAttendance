@@ -15,9 +15,12 @@ class AppConfig {
 }
 
 const defaultAppConfig = AppConfig(
-  // Docker container attendx-api is exposed on host port 8008 (0.0.0.0:8008->8000).
-  // iPhone reaches it via the Mac's LAN IP.
-  apiBaseUrl: String.fromEnvironment('FLUTTER_API_BASE_URL', defaultValue: 'http://192.168.2.146:8008'),
+  // Default matches scripts/run_ios_device.sh (Mac LAN IP from lib_mac_ip.sh + Docker :8008).
+  // Override at build time: --dart-define=FLUTTER_API_BASE_URL=http://<ip>:8008
+  apiBaseUrl: String.fromEnvironment(
+    'FLUTTER_API_BASE_URL',
+    defaultValue: 'http://127.0.0.1:8008',
+  ),
   deviceId: String.fromEnvironment('FLUTTER_DEVICE_ID', defaultValue: 'ipad-kiosk-1'),
   simulatedRecognition: bool.fromEnvironment('FLUTTER_SIMULATED_RECOGNITION', defaultValue: false),
   adminEmail: String.fromEnvironment('FLUTTER_ADMIN_EMAIL', defaultValue: 'admin@school.com'),

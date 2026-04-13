@@ -1,0 +1,22 @@
+# Face recognition API (InsightFace) — same image as attendancedemo stack.
+# Host port 8008 so it does not clash with FastAPI on 8000.
+# iPhone / Android on Wi‑Fi use: http://<this-mac-lan-ip>:8008
+services:
+  attendx-api:
+    image: attendancedemo-attendx-api:latest
+    ports:
+      - "0.0.0.0:8008:8000"
+    volumes:
+      - attendx-data:/app/data
+      - insightface-models:/root/.insightface
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health || exit 1"]
+      interval: 30s
+      timeout: 15s
+      start_period: 360s
+      retries: 5
+
+volumes:
+  attendx-data:
+  insightface-models:
