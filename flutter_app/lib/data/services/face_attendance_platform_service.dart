@@ -53,6 +53,24 @@ class FaceAttendancePlatformService {
     });
   }
 
+  /// Fast face bounding-box detection on a JPEG — no embedding is extracted.
+  ///
+  /// Returns a map with keys: detected(bool), x, y, w, h (0-1, top-left origin), quality.
+  /// Returns {detected: false} on web or when no face is found.
+  Future<Map<String, dynamic>> detectFaceBounds(Uint8List jpegBytes) async {
+    if (kIsWeb) return const {'detected': false};
+    try {
+      final raw = await _methodChannel.invokeMethod<Map<dynamic, dynamic>>(
+        'detectFaceBounds',
+        {'jpegBytes': jpegBytes},
+      );
+      if (raw == null) return const {'detected': false};
+      return raw.map((k, v) => MapEntry(k.toString(), v));
+    } catch (_) {
+      return const {'detected': false};
+    }
+  }
+
   /// Sends a JPEG image to the native plugin, detects the face in it, and
   /// returns the embedding vector as [List<double>].
   ///

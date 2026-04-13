@@ -69,6 +69,14 @@ public class FaceAttendancePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       }
       extractEmbeddingFromJpeg(data: typedData.data, result: result)
 
+    case "detectFaceBounds":
+      guard let args = call.arguments as? [String: Any],
+            let typedData = args["jpegBytes"] as? FlutterStandardTypedData else {
+        result(FlutterError(code: "INVALID_ARGS", message: "jpegBytes required", details: nil))
+        return
+      }
+      detectFaceBounds(data: typedData.data, result: result)
+
     default:
       result(FlutterMethodNotImplemented)
     }
@@ -107,6 +115,36 @@ public class FaceAttendancePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         self?.eventSink?(event.toDictionary())
       }
     )
+  }
+
+  /// Fast face bounding-box detection on a still JPEG — no embedding extracted.
+  /// Returns { detected: Bool, x: Double, y: Double, w: Double, h: Double, quality: Double }
+  /// Coordinates are normalised 0-1, top-left origin.
+  private func detectFaceBounds(data: Data, result: @escaping FlutterResult) {
+    DispatchQueue.global(qos: .userInitiated).async {
+      guard let uiImage = UIImage(data: data), let cgImage = uiImage.cgImage else {
+        DispatchQueue.main.async { result(["detected": false]) }
+        return
+      }
+      let request = VNDetectFaceRectanglesRequest()
+      let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+      try? handler.perform([request])
+      guard let face = request.results?.first as? VNFaceObservation else {
+        DispatchQueue.main.async { result(["detected": false]) }
+        return
+      }
+      let b = face.boundingBox
+      // Vision uses bottom-left origin; convert to top-left for Flutter.
+      let payload: [String: Any] = [
+        "detected": true,
+        "x": Double(b.origin.x),
+        "y": Double(1.0 - b.origin.y - b.height),
+        "w": Double(b.width),
+        "h": Double(b.height),
+        "quality": Double(face.confidence),
+      ]
+      DispatchQueue.main.async { result(payload) }
+    }
   }
 
   /// Runs VNDetectFaceLandmarksRequest on the still JPEG (single pass, no crop needed).
